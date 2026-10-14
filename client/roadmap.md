@@ -1,0 +1,20 @@
+# Roadmap
+- [x] AI invitation parser -> prefilled visitor request (AI Gateway)
+- [x] E-Work Permit submit + manager approve
+- [x] Helpdesk ticket workflow
+- [x] Local browser storage for visitor requests and permits
+- [x] VMS screens: submit, pending/approved lists, send invitation
+- [x] E-Work Permit screens: submit, pending/approved, manager approve
+- [x] Visitor arrival confirmation (check off approved invites)
+- [ ] Company email domain + automatic invitation sending (blocked: user must set up domain)
+- [x] Visitor email field used for invitations + pass link
+- [x] E-Work Permit end-to-end browser walk-through + persistence check
+- [x] Visitor pass with QR code for approved visitors
+- [x] VMS dashboard: upcoming arrivals, pending requests, calendar of approved visitors
+- [x] Gate desk (QR scan / ID entry, confirm arrival) + gate log with time and gate
+- [x] Auto-expire past pending/approved requests
+- [x] Visitor portal (Visitor ID + email sign-in, pass, arrival status, edit details)
+- [x] Visitor portal end-to-end walk
+- [x] Gate arrival closes pending requests
+- [x] Downloadable visitor pass (image)
+- [x] Visitor Portal tile on home + sign-in page
