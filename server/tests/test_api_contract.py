@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
@@ -93,6 +93,7 @@ from app import (
     approve_visit,
     issue_visitor_guest_pass,
     public_visitor_check_in,
+    public_visitor_pass_by_qr_token,
     send_visitor_checkin_otp,
     verify_visitor_checkin_otp,
     list_helpdesk_feedback,
@@ -1528,7 +1529,7 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("Repair the office light fixture.", plain)
         self.assertIn("https://app.example.test/hd-ticket/ticket-1", plain)
 
-    def test_helpdesk_closed_email_uses_public_ticket_link_only_for_guest_requester(self):
+    def test_helpdesk_closed_email_sends_requester_only_ticket_feedback_link(self):
         smtp = MagicMock()
         smtp.__enter__.return_value = smtp
         smtp.__exit__.return_value = False
@@ -1554,6 +1555,12 @@ class ApiContractTests(unittest.TestCase):
                         "Name": "Guest",
                         "Email": "guest@example.test",
                         "PublicRequester": True,
+                        "TicketRaiser": True,
+                    },
+                    {
+                        "Name": "Employee",
+                        "Email": "employee@example.test",
+                        "TicketRaiser": True,
                     },
                 ],
                 {
@@ -1580,18 +1587,29 @@ class ApiContractTests(unittest.TestCase):
         employee_plain = messages["employee@example.test"].get_body(
             preferencelist=("plain",)
         ).get_content()
-        self.assertIn("https://app.example.test/hd-ticket/ticket-1", employee_plain)
+        self.assertNotIn("View ticket:", employee_plain)
+        self.assertNotIn("https://app.example.test/hd-ticket/ticket-1", employee_plain)
+        self.assertIn(
+            "https://app.example.test/hd-raise?building=building-1&ticket=ticket-1",
+            employee_plain,
+        )
         guest_plain = messages["guest@example.test"].get_body(
             preferencelist=("plain",)
         ).get_content()
+        self.assertNotIn("View ticket:", guest_plain)
+        self.assertNotIn("https://app.example.test/hd-ticket/ticket-1", guest_plain)
         self.assertIn(
             "https://app.example.test/hd-raise?building=building-1&ticket=ticket-1",
             guest_plain,
         )
-        self.assertNotIn("https://app.example.test/hd-ticket/ticket-1", guest_plain)
         self.assertIn("resolved and closed", guest_plain)
         self.assertIn("We'd love to hear your feedback", guest_plain)
-        self.assertIn("https://app.example.test/hd-raise?building=building-1", guest_plain)
+        self.assertEqual(guest_plain.count("Share feedback:"), 1)
+        guest_html = messages["guest@example.test"].get_body(
+            preferencelist=("html",)
+        ).get_content()
+        self.assertIn(">Share your feedback</a>", guest_html)
+        self.assertNotIn(">View ticket</a>", guest_html)
 
     def test_helpdesk_close_schedules_email_after_transition_only(self):
         context = MagicMock()
@@ -1602,7 +1620,7 @@ class ApiContractTests(unittest.TestCase):
             "TicketNo": "HD-2026-0001",
             "RaisedByName": "Employee",
             "RaisedByEmail": "employee@example.test",
-            "RaisedByUserId": None,
+            "RaisedByUserId": "employee-1",
             "Category": "Maintenance",
             "Location": "North Office",
             "BuildingId": "building-1",
@@ -1645,7 +1663,8 @@ class ApiContractTests(unittest.TestCase):
             for recipient in recipients
             if recipient["Email"] == "employee@example.test"
         )
-        self.assertTrue(requester["PublicRequester"])
+        self.assertTrue(requester["TicketRaiser"])
+        self.assertFalse(requester["PublicRequester"])
         self.assertIn("UPDLOCK, ROWLOCK", cursor.execute.call_args_list[0].args[0])
         self.assertIn("RaisedByUserId", cursor.execute.call_args_list[0].args[0])
 
@@ -2369,6 +2388,7 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("/api/vms/notifications", paths)
         self.assertIn("/api/vms/notifications/read", paths)
         self.assertIn("/api/public/visits/{visit_id}/pass", paths)
+        self.assertIn("/api/public/visitor-passes/{token}", paths)
         self.assertIn("/api/public/visits/{visit_id}/check-in", paths)
         self.assertIn("/api/public/visits/{visit_id}/check-in/otp", paths)
         self.assertIn("/api/public/visits/{visit_id}/check-in/verify", paths)
@@ -3266,15 +3286,113 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(result["status"], "CHECKED_OUT")
         read_virtual.assert_not_called()
 
-    def test_public_qr_check_in_endpoint_no_longer_allows_otp_bypass(self):
-        with self.assertRaises(HTTPException) as context:
-            public_visitor_check_in(
+    def test_public_visitor_pass_lookup_by_qr_token_reports_verified_state(self):
+        context = MagicMock()
+        context.__exit__.return_value = False
+        visit = {"Id": "visit-1", "Status": "APPROVED"}
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._public_visit_by_qr_token", return_value=visit),
+            patch("app._visitor_checkin_otp_verified", return_value=True) as is_verified,
+            patch(
+                "app._public_visit_payload",
+                return_value={"id": "visit-1", "check_in_verified": True},
+            ) as payload,
+        ):
+            result = public_visitor_pass_by_qr_token("s" * 64)
+
+        self.assertTrue(result["check_in_verified"])
+        is_verified.assert_called_once_with(context.__enter__.return_value, "visit-1")
+        payload.assert_called_once_with(visit, True)
+
+    def test_public_qr_check_in_requires_verified_otp(self):
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        db_context = MagicMock()
+        cursor = db_context.__enter__.return_value
+        cursor.fetchone.return_value = None
+        db_context.__exit__.return_value = False
+        with self.assertRaises(HTTPException) as error:
+            with (
+                patch("app.cursor", return_value=db_context),
+                patch(
+                    "app._public_visit_by_token",
+                    return_value={
+                        "Status": "APPROVED",
+                        "Email": "visitor@example.com",
+                        "VisitDate": now.date(),
+                        "ExpectedArrival": (now - timedelta(minutes=5)).time(),
+                        "ExpectedDeparture": (now + timedelta(minutes=30)).time(),
+                    },
+                ),
+                patch("app._require_visitor_inside_geofence"),
+            ):
+                public_visitor_check_in(
+                    "visit-1",
+                    VisitorCheckInOtpRequest(
+                        token="s" * 64,
+                        latitude=12.0,
+                        longitude=77.0,
+                    ),
+                )
+
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertIn("Verify the visitor email", error.exception.detail)
+
+    def test_public_qr_check_in_after_verified_otp_updates_visit(self):
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        db_context = MagicMock()
+        cursor = db_context.__enter__.return_value
+        cursor.fetchone.return_value = ("visitor@example.com", datetime.now())
+        cursor.rowcount = 1
+        db_context.__exit__.return_value = False
+        with (
+            patch("app.cursor", return_value=db_context),
+            patch(
+                "app._public_visit_by_token",
+                return_value={
+                    "Id": "visit-1",
+                    "Status": "APPROVED",
+                    "Email": "visitor@example.com",
+                    "VisitDate": now.date(),
+                    "ExpectedArrival": (now - timedelta(minutes=5)).time(),
+                    "ExpectedDeparture": (now + timedelta(minutes=30)).time(),
+                },
+            ),
+            patch("app._require_visitor_checkin_window") as check_window,
+            patch("app._require_visitor_inside_geofence") as check_geofence,
+            patch(
+                "app.rows_as_dicts",
+                return_value=[{"Id": "visit-1", "Status": "CHECKED_IN"}],
+            ),
+            patch(
+                "app._public_visit_payload",
+                return_value={"id": "visit-1", "status": "CHECKED_IN"},
+            ) as payload,
+            patch("app._append_vms_notification"),
+        ):
+            result = public_visitor_check_in(
                 "visit-1",
-                VisitorTokenRequest(token="s" * 64),
+                VisitorCheckInOtpRequest(
+                    token="s" * 64,
+                    latitude=12.0,
+                    longitude=77.0,
+                ),
             )
 
-        self.assertEqual(context.exception.status_code, 403)
-        self.assertIn("OTP", context.exception.detail)
+        self.assertEqual(result["status"], "CHECKED_IN")
+        check_window.assert_called_once()
+        check_geofence.assert_called_once_with(cursor, ANY, 12.0, 77.0)
+        payload.assert_called_once_with({"Id": "visit-1", "Status": "CHECKED_IN"})
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertTrue(
+            any("SET [Status] = 'CHECKED_IN'" in statement for statement in statements)
+        )
+        self.assertTrue(
+            any(
+                "'CHECKED_IN'" in statement and "ModuleEvents" in statement
+                for statement in statements
+            )
+        )
 
     def test_visitor_geofence_distance_and_radius_check(self):
         self.assertAlmostEqual(_distance_meters(12.0, 77.0, 12.0, 77.0), 0)
@@ -3431,7 +3549,7 @@ class ApiContractTests(unittest.TestCase):
             _require_visitor_checkin_window(visit, after)
         self.assertEqual(late.exception.status_code, 409)
 
-    def test_visitor_checkin_otp_verification_counts_bad_codes_and_does_not_check_in(self):
+    def test_visitor_checkin_otp_verification_counts_bad_codes_without_checking_in(self):
         now = datetime.now(ZoneInfo("Asia/Kolkata"))
         context = MagicMock()
         cursor = context.__enter__.return_value
@@ -3477,6 +3595,68 @@ class ApiContractTests(unittest.TestCase):
                 "SET [Attempts] = [Attempts] + 1" in call.args[0]
                 for call in cursor.execute.call_args_list
             )
+        )
+        self.assertFalse(
+            any("SET [Status] = 'CHECKED_IN'" in call.args[0] for call in cursor.execute.call_args_list)
+        )
+
+    def test_visitor_checkin_otp_verification_marks_email_verified_without_checking_in(self):
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        code = "123456"
+        with patch("app.settings", SimpleNamespace(jwt_secret="s" * 32)):
+            code_hash = _visitor_checkin_otp_hash("visit-1", "visitor@example.com", code)
+        challenge = ("visitor@example.com", code_hash, datetime.now(), 0, None, 0)
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        cursor.fetchone.return_value = challenge
+        context.__exit__.return_value = False
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app.settings", SimpleNamespace(jwt_secret="s" * 32)),
+            patch(
+                "app._public_visit_by_token",
+                return_value={
+                    "Id": "visit-1",
+                    "Status": "APPROVED",
+                    "Email": "visitor@example.com",
+                    "VisitDate": now.date(),
+                    "ExpectedArrival": (now - timedelta(minutes=5)).time(),
+                    "ExpectedDeparture": (now + timedelta(minutes=30)).time(),
+                },
+            ),
+            patch("app._require_visitor_inside_geofence"),
+            patch(
+                "app.rows_as_dicts",
+                return_value=[{"Id": "visit-1", "Status": "APPROVED"}],
+            ),
+            patch(
+                "app._public_visit_payload",
+                return_value={"id": "visit-1", "check_in_verified": True},
+            ) as payload,
+        ):
+            result = verify_visitor_checkin_otp(
+                "visit-1",
+                VisitorCheckInOtpVerifyRequest(
+                    token="s" * 64,
+                    latitude=12.0,
+                    longitude=77.0,
+                    code=code,
+                ),
+            )
+
+        self.assertTrue(result["check_in_verified"])
+        payload.assert_called_once_with(
+            {"Id": "visit-1", "Status": "APPROVED"},
+            check_in_verified=True,
+        )
+        self.assertTrue(
+            any(
+                "SET [UsedAt] = SYSUTCDATETIME()" in call.args[0]
+                for call in cursor.execute.call_args_list
+            )
+        )
+        self.assertFalse(
+            any("SET [Status] = 'CHECKED_IN'" in call.args[0] for call in cursor.execute.call_args_list)
         )
 
     def test_issuing_guest_pass_updates_approved_visit_status(self):
@@ -3558,15 +3738,15 @@ class ApiContractTests(unittest.TestCase):
                 },
             ],
         )
-    def test_invitation_url_keeps_token_in_fragment_and_requires_https_public_url(self):
+    def test_invitation_url_opens_gate_verification_and_requires_https_public_url(self):
         settings = SimpleNamespace(public_app_url="https://vms.example.com")
         with patch("app.settings", settings):
-            url = _visitor_checkin_url("visit-1", "secure-token")
-            self.assertEqual(url, "https://vms.example.com/pass/visit-1#token=secure-token")
+            url = _visitor_checkin_url("secure-token")
+            self.assertEqual(url, "https://vms.example.com/gate/secure-token/verify")
 
         with patch("app.settings", SimpleNamespace(public_app_url="http://vms.example.com")):
             with self.assertRaises(RuntimeError):
-                _visitor_checkin_url("visit-1", "secure-token")
+                _visitor_checkin_url("secure-token")
 
     def test_visitor_pass_token_is_stable_and_visit_scoped(self):
         settings = SimpleNamespace(jwt_secret="s" * 32)

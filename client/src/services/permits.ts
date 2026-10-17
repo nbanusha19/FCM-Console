@@ -63,6 +63,10 @@ export async function saveVendor(v: Partial<Vendor> & { name: string }) {
     : await localDb.from("ewp_vendors").insert(v);
   fail(error);
 }
+export async function deleteVendor(id: string) {
+  const { error } = await localDb.from("ewp_vendors").delete().eq("id", id);
+  fail(error);
+}
 export async function listEwpLocations(all = false) {
   let q = localDb.from("ewp_locations").select("*").order("building");
   if (!all) q = q.eq("active", true);
@@ -79,6 +83,10 @@ export async function saveEwpLocation(l: Partial<EwpLocation> & { building: stri
   const { error } = l.id
     ? await localDb.from("ewp_locations").update(l).eq("id", l.id)
     : await localDb.from("ewp_locations").insert(l);
+  fail(error);
+}
+export async function deleteEwpLocation(id: string) {
+  const { error } = await localDb.from("ewp_locations").delete().eq("id", id);
   fail(error);
 }
 

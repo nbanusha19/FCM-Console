@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
@@ -22,10 +22,18 @@ import {
 import { QrBlock } from "@/components/common/QrBlock";
 import { StatusPill } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useApp } from "@/context/app-context";
 import { isFinished } from "@/constants/visit-status";
 import { initials, relativeTime } from "@/lib/format";
 import {
+  canDecide,
   canCreateVisitRequest,
   listVisitEvents,
   listVisitRequests,
@@ -41,8 +49,11 @@ const clockTime = (value: string) => {
   return `${hours % 12 || 12}:${String(minutes).padStart(2, "0")} ${suffix}`;
 };
 
+type DashboardList = "today" | "inside" | "pending" | "upcoming";
+
 export function VmsDashboard() {
   const { user } = useApp();
+  const [openList, setOpenList] = useState<DashboardList | null>(null);
   const { data = [], isLoading } = useQuery({
     queryKey: ["visit-requests"],
     queryFn: listVisitRequests,
@@ -56,8 +67,16 @@ export function VmsDashboard() {
   const todayVisits = data
     .filter((visit) => visit.visit_date === today && !isFinished(visit.status))
     .sort((a, b) => a.expected_arrival.localeCompare(b.expected_arrival));
-  const inside = data.filter((visit) => visit.status === "CHECKED_IN");
-  const pending = data.filter((visit) => visit.status === "PENDING");
+  const inside = data.filter((visit) => visit.status === "CHECKED_IN" && !visit.checked_out_at);
+  const canViewApprovals = ["ADMIN", "BRANCH_MANAGER"].includes(user?.role ?? "");
+  const pending = canViewApprovals
+    ? data.filter(
+        (visit) =>
+          visit.status === "PENDING" &&
+          canDecide(user, visit) &&
+          (visit.host_id === user?.id || user?.role !== "EMPLOYEE"),
+      )
+    : data.filter((visit) => visit.status === "PENDING");
   const upcoming = data.filter(
     (visit) => ["APPROVED", "CARD_ISSUED"].includes(visit.status) && visit.visit_date >= today,
   ).length;
@@ -118,6 +137,7 @@ export function VmsDashboard() {
 
       <section aria-label="Visitor summary" className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
         <SummaryStat
+          onClick={() => setOpenList("today")}
           label="Visitors today"
           value={todayVisits.length}
           caption={`${todayVisits.filter((visit) => visit.status !== "CHECKED_IN").length} still expected`}
@@ -125,6 +145,7 @@ export function VmsDashboard() {
           tone="blue"
         />
         <SummaryStat
+          onClick={() => setOpenList("inside")}
           label="Currently inside"
           value={inside.length}
           caption="All within schedule"
@@ -132,6 +153,7 @@ export function VmsDashboard() {
           tone="green"
         />
         <SummaryStat
+          onClick={() => setOpenList("pending")}
           label="Pending approvals"
           value={pending.length}
           caption="Requests waiting"
@@ -139,6 +161,7 @@ export function VmsDashboard() {
           tone="amber"
         />
         <SummaryStat
+          onClick={() => setOpenList("upcoming")}
           label="Upcoming visits"
           value={upcoming}
           caption="Approved today and future visits"
@@ -146,6 +169,13 @@ export function VmsDashboard() {
           tone="blue"
         />
       </section>
+
+      <DashboardVisitsDialog
+        list={openList}
+        visits={data}
+        today={today}
+        onOpenChange={(open) => !open && setOpenList(null)}
+      />
 
       <div className="grid gap-2.5">
         <div className="grid gap-2.5 lg:grid-cols-[3fr_2fr]">
@@ -330,12 +360,14 @@ export function VmsDashboard() {
 }
 
 function SummaryStat({
+  onClick,
   label,
   value,
   caption,
   icon: Icon,
   tone,
 }: {
+  onClick: () => void;
   label: string;
   value: number;
   caption: string;
@@ -354,24 +386,134 @@ function SummaryStat({
     },
   };
   return (
-    <section
-      className={`group relative isolate overflow-hidden surface-card bg-linear-to-br via-card to-card p-3.5 transition-all duration-300 ease-out before:absolute before:inset-x-0 before:top-0 before:h-1 before:content-[''] hover:-translate-y-1 hover:shadow-float motion-reduce:transform-none motion-reduce:transition-none ${tones[tone].accent}`}
+    <button
+      type="button"
+      onClick={onClick}
+      className="block w-full rounded-2xl text-left focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+      aria-label={`${label}: ${value}. Show visitor list.`}
     >
-      <div className="relative flex items-center justify-between">
-        <p className="text-[10px] text-muted-foreground">{label}</p>
-        <span
-          className={`grid size-6 place-items-center rounded-md transition-transform duration-300 group-hover:scale-110 motion-reduce:transition-none ${tones[tone].icon}`}
-        >
-          <Icon className="size-3.5" />
-        </span>
-      </div>
-      <p className="relative mt-1 font-display text-[22px] font-extrabold leading-none">{value}</p>
-      <p
-        className={`relative mt-1 text-[9px] ${tone === "green" ? "font-semibold text-success" : "text-muted-foreground"}`}
+      <section
+        className={`group relative isolate overflow-hidden surface-card bg-linear-to-br via-card to-card p-3.5 transition-all duration-300 ease-out before:absolute before:inset-x-0 before:top-0 before:h-1 before:content-[''] hover:-translate-y-1 hover:shadow-float motion-reduce:transform-none motion-reduce:transition-none ${tones[tone].accent}`}
       >
-        {caption}
-      </p>
-    </section>
+        <div className="relative flex items-center justify-between">
+          <p className="text-[10px] text-muted-foreground">{label}</p>
+          <span
+            className={`grid size-6 place-items-center rounded-md transition-transform duration-300 group-hover:scale-110 motion-reduce:transition-none ${tones[tone].icon}`}
+          >
+            <Icon className="size-3.5" />
+          </span>
+        </div>
+        <p className="relative mt-1 font-display text-[22px] font-extrabold leading-none">
+          {value}
+        </p>
+        <p
+          className={`relative mt-1 text-[9px] ${tone === "green" ? "font-semibold text-success" : "text-muted-foreground"}`}
+        >
+          {caption}
+        </p>
+      </section>
+    </button>
+  );
+}
+
+function DashboardVisitsDialog({
+  list,
+  visits,
+  today,
+  onOpenChange,
+}: {
+  list: DashboardList | null;
+  visits: VisitRequest[];
+  today: string;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const titles: Record<DashboardList, string> = {
+    today: "Visitors today",
+    inside: "Currently inside",
+    pending: "Pending approvals",
+    upcoming: "Upcoming visits",
+  };
+  const filteredVisits = visits
+    .filter((visit) => {
+      switch (list) {
+        case "today":
+          return visit.visit_date === today && !isFinished(visit.status);
+        case "inside":
+          return visit.status === "CHECKED_IN" && !visit.checked_out_at;
+        case "pending":
+          return visit.status === "PENDING";
+        case "upcoming":
+          return ["APPROVED", "CARD_ISSUED"].includes(visit.status) && visit.visit_date >= today;
+        default:
+          return false;
+      }
+    })
+    .sort((a, b) =>
+      `${a.visit_date} ${a.expected_arrival}`.localeCompare(
+        `${b.visit_date} ${b.expected_arrival}`,
+      ),
+    );
+
+  return (
+    <Dialog open={list !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{list ? titles[list] : "Visitors"}</DialogTitle>
+          <DialogDescription>
+            {filteredVisits.length} visitor{filteredVisits.length === 1 ? "" : "s"} in this list.
+          </DialogDescription>
+        </DialogHeader>
+        {filteredVisits.length ? (
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full min-w-[620px] text-left text-xs">
+              <thead className="bg-muted/60 text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Visitor</th>
+                  <th className="px-3 py-2 font-medium">Visitor ID</th>
+                  <th className="px-3 py-2 font-medium">Date</th>
+                  <th className="px-3 py-2 font-medium">Time</th>
+                  <th className="px-3 py-2 font-medium">Host</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {filteredVisits.map((visit) => (
+                  <tr key={visit.id}>
+                    <td className="px-3 py-2">
+                      <Link
+                        to="/vms-visit/$id"
+                        params={{ id: visit.id }}
+                        className="font-semibold hover:text-primary hover:underline"
+                      >
+                        {visit.visitor_name}
+                      </Link>
+                      <p className="text-[10px] text-muted-foreground">
+                        {visit.company || visit.location || "Visitor"}
+                      </p>
+                    </td>
+                    <td className="px-3 py-2 font-mono">
+                      {visit.visitor_code || visit.request_no}
+                    </td>
+                    <td className="px-3 py-2">{visit.visit_date}</td>
+                    <td className="px-3 py-2">
+                      {clockTime(visit.expected_arrival)} – {clockTime(visit.expected_departure)}
+                    </td>
+                    <td className="px-3 py-2">{visit.host_name || "—"}</td>
+                    <td className="px-3 py-2">
+                      <StatusPill status={visit.status} className="px-1.5 py-0.5 text-[9px]" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+            No visitors are in this list.
+          </p>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

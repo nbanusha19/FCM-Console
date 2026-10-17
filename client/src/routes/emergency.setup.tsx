@@ -1,12 +1,22 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Eye, Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
+import { MasterDeleteButton } from "@/components/masters/MasterDeleteButton";
 import { usePaged } from "@/components/common/TableCard";
 import { Pill } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Dialog,
   DialogContent,
@@ -17,6 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -26,7 +37,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useApp } from "@/context/app-context";
-import { canManageEmergency, configService } from "@/services/emergency";
+import {
+  canManageEmergency,
+  configService,
+  type AssemblyPoint,
+  type IncidentType,
+} from "@/services/emergency";
 
 export const Route = createFileRoute("/emergency/setup")({
   component: Setup,
@@ -50,6 +66,15 @@ function Setup() {
   const [t, setT] = useState("");
   const [assemblyDialogOpen, setAssemblyDialogOpen] = useState(false);
   const [typeDialogOpen, setTypeDialogOpen] = useState(false);
+  const [editingPoint, setEditingPoint] = useState<AssemblyPoint | null>(null);
+  const [editingType, setEditingType] = useState<IncidentType | null>(null);
+  const [viewingPoint, setViewingPoint] = useState<AssemblyPoint | null>(null);
+  const [viewingType, setViewingType] = useState<IncidentType | null>(null);
+  const [pendingStatus, setPendingStatus] = useState<
+    | { kind: "point"; item: AssemblyPoint; active: boolean }
+    | { kind: "type"; item: IncidentType; active: boolean }
+    | null
+  >(null);
   const [saving, setSaving] = useState(false);
   const pagedPoints = usePaged(points);
   const pagedTypes = usePaged(types);
@@ -77,7 +102,7 @@ function Setup() {
     <Pill tone={a ? "success" : "neutral"}>{a ? "Active" : "Inactive"}</Pill>
   );
 
-  const addAssemblyPoint = async (event: React.FormEvent<HTMLFormElement>) => {
+  const saveAssemblyPoint = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (p.name.trim().length < 2) {
       toast.error("Name required");
@@ -86,6 +111,7 @@ function Setup() {
     if (
       await run(async () => {
         await configService.saveAssemblyPoint({
+          ...(editingPoint ? { id: editingPoint.id } : {}),
           name: p.name.trim(),
           location: p.location.trim(),
           description: p.description.trim(),
@@ -93,20 +119,50 @@ function Setup() {
       })
     ) {
       setP({ name: "", location: "", description: "" });
+      setEditingPoint(null);
       setAssemblyDialogOpen(false);
     }
   };
 
-  const addType = async (event: React.FormEvent<HTMLFormElement>) => {
+  const saveIncidentType = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (t.trim().length < 2) {
       toast.error("Name required");
       return;
     }
-    if (await run(() => configService.saveType({ name: t.trim(), sort_order: types.length + 1 }))) {
+    if (
+      await run(() =>
+        configService.saveType({
+          ...(editingType ? { id: editingType.id, sort_order: editingType.sort_order } : {}),
+          name: t.trim(),
+          ...(editingType ? {} : { sort_order: types.length + 1 }),
+        }),
+      )
+    ) {
       setT("");
+      setEditingType(null);
       setTypeDialogOpen(false);
     }
+  };
+
+  const updateStatus = async () => {
+    if (!pendingStatus) return;
+    const target = pendingStatus;
+    const succeeded = await run(() =>
+      target.kind === "point"
+        ? configService.saveAssemblyPoint({
+            id: target.item.id,
+            name: target.item.name,
+            active: target.active,
+          })
+        : configService.saveType({
+            id: target.item.id,
+            name: target.item.name,
+            sort_order: target.item.sort_order,
+            active: target.active,
+          }),
+    );
+    if (succeeded) setPendingStatus(null);
   };
 
   return (
@@ -115,7 +171,13 @@ function Setup() {
       <div className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="font-display text-[16px] font-bold">Assembly points</h2>
-          <Button onClick={() => setAssemblyDialogOpen(true)}>
+          <Button
+            onClick={() => {
+              setEditingPoint(null);
+              setP({ name: "", location: "", description: "" });
+              setAssemblyDialogOpen(true);
+            }}
+          >
             <Plus className="size-4" /> Add assembly point
           </Button>
         </div>
@@ -137,23 +199,57 @@ function Setup() {
                     <TableCell className="font-medium">{x.name}</TableCell>
                     <TableCell>{x.location}</TableCell>
                     <TableCell>{x.description}</TableCell>
-                    <TableCell>{active(x.active)}</TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          void run(() =>
-                            configService.saveAssemblyPoint({
-                              id: x.id,
-                              name: x.name,
-                              active: !x.active,
-                            }),
-                          )
+                    <TableCell>
+                      <Switch
+                        checked={x.active}
+                        disabled={saving}
+                        className="data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-emerald-200"
+                        aria-label={`Set ${x.name} ${x.active ? "inactive" : "active"}`}
+                        onCheckedChange={(active) =>
+                          setPendingStatus({ kind: "point", item: x, active })
                         }
-                      >
-                        {x.active ? "Deactivate" : "Activate"}
-                      </Button>
+                      />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="View assembly point"
+                          aria-label={`View ${x.name}`}
+                          onClick={() => setViewingPoint(x)}
+                        >
+                          <Eye className="size-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="Edit assembly point"
+                          aria-label={`Edit ${x.name}`}
+                          onClick={() => {
+                            setEditingPoint(x);
+                            setP({
+                              name: x.name,
+                              location: x.location,
+                              description: x.description,
+                            });
+                            setAssemblyDialogOpen(true);
+                          }}
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                        <MasterDeleteButton
+                          name={`assembly point "${x.name}"`}
+                          description="This permanently deletes the assembly point. If it is in use by an emergency record, deletion will be rejected."
+                          onDelete={async () => {
+                            await configService.deleteAssemblyPoint(x.id);
+                            ["emg-points-all", "emg-points"].forEach((k) =>
+                              qc.invalidateQueries({ queryKey: [k] }),
+                            );
+                            toast.success("Assembly point deleted.");
+                          }}
+                        />
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -167,7 +263,13 @@ function Setup() {
       <div className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="font-display text-[16px] font-bold">Incident types</h2>
-          <Button onClick={() => setTypeDialogOpen(true)}>
+          <Button
+            onClick={() => {
+              setEditingType(null);
+              setT("");
+              setTypeDialogOpen(true);
+            }}
+          >
             <Plus className="size-4" /> Add type
           </Button>
         </div>
@@ -185,23 +287,53 @@ function Setup() {
                 {pagedTypes.rows.map((x) => (
                   <TableRow key={x.id}>
                     <TableCell className="font-medium">{x.name}</TableCell>
-                    <TableCell>{active(x.active)}</TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          void run(() =>
-                            configService.saveType({
-                              id: x.id,
-                              name: x.name,
-                              active: !x.active,
-                            }),
-                          )
+                    <TableCell>
+                      <Switch
+                        checked={x.active}
+                        disabled={saving}
+                        className="data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-emerald-200"
+                        aria-label={`Set ${x.name} ${x.active ? "inactive" : "active"}`}
+                        onCheckedChange={(active) =>
+                          setPendingStatus({ kind: "type", item: x, active })
                         }
-                      >
-                        {x.active ? "Deactivate" : "Activate"}
-                      </Button>
+                      />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="View incident type"
+                          aria-label={`View ${x.name}`}
+                          onClick={() => setViewingType(x)}
+                        >
+                          <Eye className="size-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="Edit incident type"
+                          aria-label={`Edit ${x.name}`}
+                          onClick={() => {
+                            setEditingType(x);
+                            setT(x.name);
+                            setTypeDialogOpen(true);
+                          }}
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                        <MasterDeleteButton
+                          name={`incident type "${x.name}"`}
+                          description="This permanently deletes the incident type. If it is in use by an emergency record, deletion will be rejected."
+                          onDelete={async () => {
+                            await configService.deleteType(x.id);
+                            ["emg-types-all", "emg-types"].forEach((k) =>
+                              qc.invalidateQueries({ queryKey: [k] }),
+                            );
+                            toast.success("Incident type deleted.");
+                          }}
+                        />
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -215,17 +347,23 @@ function Setup() {
       <Dialog
         open={assemblyDialogOpen}
         onOpenChange={(open) => {
-          if (!saving) setAssemblyDialogOpen(open);
+          if (!saving) {
+            setAssemblyDialogOpen(open);
+            if (!open) {
+              setEditingPoint(null);
+              setP({ name: "", location: "", description: "" });
+            }
+          }
         }}
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add assembly point</DialogTitle>
+            <DialogTitle>{editingPoint ? "Edit assembly point" : "Add assembly point"}</DialogTitle>
             <DialogDescription>
               Add a safe location employees can use during an emergency.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={addAssemblyPoint} className="space-y-4">
+          <form onSubmit={saveAssemblyPoint} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="assembly-name">Assembly point name</Label>
               <Input
@@ -262,7 +400,7 @@ function Setup() {
                 Cancel
               </Button>
               <Button type="submit" disabled={saving}>
-                {saving ? "Saving…" : "Add assembly point"}
+                {saving ? "Saving…" : editingPoint ? "Save changes" : "Add assembly point"}
               </Button>
             </DialogFooter>
           </form>
@@ -272,17 +410,23 @@ function Setup() {
       <Dialog
         open={typeDialogOpen}
         onOpenChange={(open) => {
-          if (!saving) setTypeDialogOpen(open);
+          if (!saving) {
+            setTypeDialogOpen(open);
+            if (!open) {
+              setEditingType(null);
+              setT("");
+            }
+          }
         }}
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add incident type</DialogTitle>
+            <DialogTitle>{editingType ? "Edit incident type" : "Add incident type"}</DialogTitle>
             <DialogDescription>
               Add an incident type that can be selected when declaring an emergency.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={addType} className="space-y-4">
+          <form onSubmit={saveIncidentType} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="incident-type">Incident type</Label>
               <Input
@@ -303,12 +447,86 @@ function Setup() {
                 Cancel
               </Button>
               <Button type="submit" disabled={saving}>
-                {saving ? "Saving…" : "Add type"}
+                {saving ? "Saving…" : editingType ? "Save changes" : "Add type"}
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={viewingPoint !== null} onOpenChange={(open) => !open && setViewingPoint(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assembly point details</DialogTitle>
+            <DialogDescription>View this emergency assembly point.</DialogDescription>
+          </DialogHeader>
+          {viewingPoint ? (
+            <div className="space-y-4">
+              <Detail label="Assembly point" value={viewingPoint.name} />
+              <Detail label="Location" value={viewingPoint.location} />
+              <Detail label="Description" value={viewingPoint.description} />
+              <div className="flex items-center justify-between">
+                <Label>Status</Label>
+                {active(viewingPoint.active)}
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={viewingType !== null} onOpenChange={(open) => !open && setViewingType(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Incident type details</DialogTitle>
+            <DialogDescription>View this emergency incident type.</DialogDescription>
+          </DialogHeader>
+          {viewingType ? (
+            <div className="space-y-4">
+              <Detail label="Incident type" value={viewingType.name} />
+              <div className="flex items-center justify-between">
+                <Label>Status</Label>
+                {active(viewingType.active)}
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={pendingStatus !== null}
+        onOpenChange={(open) => {
+          if (!open && !saving) setPendingStatus(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingStatus?.active ? "Activate" : "Deactivate"}{" "}
+              {pendingStatus?.kind === "point" ? "assembly point" : "incident type"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingStatus
+                ? `Are you sure you want to ${pendingStatus.active ? "activate" : "deactivate"} "${pendingStatus.item.name}"?`
+                : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>
+            <Button disabled={saving} onClick={() => void updateStatus()}>
+              {saving ? "Saving…" : "Confirm"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string | null | undefined }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-sm font-medium">{value?.trim() || "—"}</p>
     </div>
   );
 }

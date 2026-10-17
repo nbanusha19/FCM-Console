@@ -43,10 +43,10 @@ const ARTWORK: Record<string, { main: typeof ContactRound; detail: typeof BadgeC
 };
 
 const TILE_LABELS: Record<string, string> = {
-  vms: "FCM Visitor Management",
-  eworkpermit: "FCM E-WORK Permit",
-  helpdesk: "FCM Helpdesk",
-  emergency: "FCM Emergency Evacuation",
+  vms: "Visitor Management",
+  eworkpermit: "E-WORK Permit",
+  helpdesk: "Helpdesk",
+  emergency: "Emergency Evacuation",
 };
 
 function HomePage() {

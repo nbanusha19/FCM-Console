@@ -1,13 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Eye, Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
+import { MasterDeleteButton } from "@/components/masters/MasterDeleteButton";
 import { usePaged } from "@/components/common/TableCard";
-import { Pill } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -25,7 +27,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useApp } from "@/context/app-context";
-import { listEwpLocations, listVendors, saveEwpLocation, saveVendor } from "@/services/permits";
+import { deleteVendor, listVendors, saveVendor, type Vendor } from "@/services/permits";
 
 export const Route = createFileRoute("/ework-permit/setup")({
   component: Setup,
@@ -40,26 +42,19 @@ function Setup() {
     queryFn: () => listVendors(true),
     enabled: isAdmin,
   });
-  const { data: locs = [] } = useQuery({
-    queryKey: ["ewp-locations-all"],
-    queryFn: () => listEwpLocations(true),
-    enabled: isAdmin,
-  });
   const [v, setV] = useState({ name: "", contact: "", email: "" });
-  const [l, setL] = useState({ building: "", floor: "", area: "" });
   const [vendorDialogOpen, setVendorDialogOpen] = useState(false);
-  const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const [editingVendor, setEditingVendor] = useState<Vendor | null>(null);
+  const [viewingVendor, setViewingVendor] = useState<Vendor | null>(null);
+  const [updatingVendorId, setUpdatingVendorId] = useState<string | null>(null);
   const pagedVendors = usePaged(vendors);
-  const pagedLocations = usePaged(locs);
   const refresh = () =>
-    ["ewp-vendors-all", "ewp-vendors", "ewp-locations-all", "ewp-locations"].forEach((k) =>
-      qc.invalidateQueries({ queryKey: [k] }),
-    );
-  const run = async (fn: () => Promise<void>) => {
+    ["ewp-vendors-all", "ewp-vendors"].forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
+  const run = async (fn: () => Promise<void>, successMessage = "Saved") => {
     try {
       await fn();
       refresh();
-      toast.success("Saved");
+      toast.success(successMessage);
       return true;
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
@@ -70,7 +65,7 @@ function Setup() {
   if (!isAdmin) {
     return (
       <p role="alert" className="text-sm text-muted-foreground">
-        Only administrators can manage E-Work Permit vendors and locations.
+        Only administrators can manage E-Work Permit vendors.
       </p>
     );
   }
@@ -79,13 +74,19 @@ function Setup() {
     <div className="space-y-8">
       <PageHeader
         eyebrow="E-Work Permit"
-        title="Vendors & locations"
-        subtitle="Configurable lists used on the permit form."
+        title="Vendors"
+        subtitle="Manage vendors used on E-Work Permit requests."
       />
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="font-display text-[15px] font-bold">Vendors</h2>
-          <Button onClick={() => setVendorDialogOpen(true)}>
+          <Button
+            onClick={() => {
+              setEditingVendor(null);
+              setV({ name: "", contact: "", email: "" });
+              setVendorDialogOpen(true);
+            }}
+          >
             <Plus className="size-4" /> Add vendor
           </Button>
         </div>
@@ -107,20 +108,54 @@ function Setup() {
                   <TableCell>{x.contact}</TableCell>
                   <TableCell>{x.email}</TableCell>
                   <TableCell>
-                    <Pill tone={x.active ? "success" : "neutral"}>
-                      {x.active ? "Active" : "Inactive"}
-                    </Pill>
+                    <Switch
+                      checked={x.active}
+                      disabled={updatingVendorId === x.id}
+                      className="data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-emerald-200"
+                      aria-label={`Set ${x.name} ${x.active ? "inactive" : "active"}`}
+                      onCheckedChange={(active) => {
+                        setUpdatingVendorId(x.id);
+                        void run(
+                          () => saveVendor({ id: x.id, name: x.name, active }),
+                          `Vendor ${active ? "activated" : "deactivated"}.`,
+                        ).finally(() => setUpdatingVendorId(null));
+                      }}
+                    />
                   </TableCell>
                   <TableCell className="text-right">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        run(() => saveVendor({ id: x.id, name: x.name, active: !x.active }))
-                      }
-                    >
-                      {x.active ? "Deactivate" : "Activate"}
-                    </Button>
+                    <div className="flex justify-end">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        title="View vendor"
+                        aria-label={`View ${x.name}`}
+                        onClick={() => setViewingVendor(x)}
+                      >
+                        <Eye className="size-4" />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        title="Edit vendor"
+                        aria-label={`Edit ${x.name}`}
+                        onClick={() => {
+                          setEditingVendor(x);
+                          setV({ name: x.name, contact: x.contact, email: x.email });
+                          setVendorDialogOpen(true);
+                        }}
+                      >
+                        <Pencil className="size-4" />
+                      </Button>
+                      <MasterDeleteButton
+                        name={`vendor "${x.name}"`}
+                        description="This removes the vendor from the selectable E-Work Permit vendor list. Existing permit records are preserved."
+                        onDelete={async () => {
+                          await deleteVendor(x.id);
+                          refresh();
+                          toast.success("Vendor deleted.");
+                        }}
+                      />
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -129,66 +164,26 @@ function Setup() {
           {pagedVendors.footer}
         </div>
       </section>
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="font-display text-[15px] font-bold">Locations</h2>
-          <Button onClick={() => setLocationDialogOpen(true)}>
-            <Plus className="size-4" /> Add location
-          </Button>
-        </div>
-        <div className="surface-card overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Building</TableHead>
-                <TableHead>Floor</TableHead>
-                <TableHead>Area</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {pagedLocations.rows.map((x) => (
-                <TableRow key={x.id}>
-                  <TableCell className="font-medium">{x.building}</TableCell>
-                  <TableCell>{x.floor}</TableCell>
-                  <TableCell>{x.area}</TableCell>
-                  <TableCell>
-                    <Pill tone={x.active ? "success" : "neutral"}>
-                      {x.active ? "Active" : "Inactive"}
-                    </Pill>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        run(() =>
-                          saveEwpLocation({ id: x.id, building: x.building, active: !x.active }),
-                        )
-                      }
-                    >
-                      {x.active ? "Deactivate" : "Activate"}
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          {pagedLocations.footer}
-        </div>
-      </section>
 
-      <Dialog open={vendorDialogOpen} onOpenChange={setVendorDialogOpen}>
+      <Dialog
+        open={vendorDialogOpen}
+        onOpenChange={(open) => {
+          setVendorDialogOpen(open);
+          if (!open) {
+            setEditingVendor(null);
+            setV({ name: "", contact: "", email: "" });
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add vendor</DialogTitle>
+            <DialogTitle>{editingVendor ? "Edit vendor" : "Add vendor"}</DialogTitle>
             <DialogDescription>
               Enter the vendor details used for permit requests.
             </DialogDescription>
           </DialogHeader>
           <form
-            id="add-vendor-form"
+            id="edit-vendor-form"
             className="space-y-3"
             onSubmit={async (e) => {
               e.preventDefault();
@@ -198,8 +193,9 @@ function Setup() {
               }
               if (
                 await run(async () => {
-                  await saveVendor(v);
+                  await saveVendor({ ...v, ...(editingVendor ? { id: editingVendor.id } : {}) });
                   setV({ name: "", contact: "", email: "" });
+                  setEditingVendor(null);
                 })
               )
                 setVendorDialogOpen(false);
@@ -227,63 +223,73 @@ function Setup() {
             <Button type="button" variant="outline" onClick={() => setVendorDialogOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit" form="add-vendor-form">
-              <Plus className="size-4" /> Add vendor
+            <Button type="submit" form="edit-vendor-form">
+              {editingVendor ? <Pencil className="size-4" /> : <Plus className="size-4" />}
+              {editingVendor ? "Save changes" : "Add vendor"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={locationDialogOpen} onOpenChange={setLocationDialogOpen}>
+      <Dialog
+        open={viewingVendor !== null}
+        onOpenChange={(open) => !open && setViewingVendor(null)}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add location</DialogTitle>
-            <DialogDescription>Enter the building and location details.</DialogDescription>
+            <DialogTitle>Vendor details</DialogTitle>
+            <DialogDescription>View and manage this E-Work Permit vendor.</DialogDescription>
           </DialogHeader>
-          <form
-            id="add-location-form"
-            className="space-y-3"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              if (!l.building.trim()) {
-                toast.error("Building required");
-                return;
-              }
-              if (
-                await run(async () => {
-                  await saveEwpLocation(l);
-                  setL({ building: "", floor: "", area: "" });
-                })
-              )
-                setLocationDialogOpen(false);
-            }}
-          >
-            <Input
-              autoFocus
-              placeholder="Building"
-              value={l.building}
-              onChange={(e) => setL({ ...l, building: e.target.value })}
-            />
-            <Input
-              placeholder="Floor"
-              value={l.floor}
-              onChange={(e) => setL({ ...l, floor: e.target.value })}
-            />
-            <Input
-              placeholder="Area"
-              value={l.area}
-              onChange={(e) => setL({ ...l, area: e.target.value })}
-            />
-          </form>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setLocationDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" form="add-location-form">
-              <Plus className="size-4" /> Add location
-            </Button>
-          </DialogFooter>
+          {viewingVendor ? (
+            <div className="space-y-4">
+              <Detail label="Vendor" value={viewingVendor.name} />
+              <Detail label="Contact" value={viewingVendor.contact} />
+              <Detail label="Email" value={viewingVendor.email} />
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <Label htmlFor="vendor-active-switch">Status</Label>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={
+                      viewingVendor.active
+                        ? "text-sm font-medium text-emerald-700"
+                        : "text-sm text-muted-foreground"
+                    }
+                  >
+                    {viewingVendor.active ? "Active" : "Inactive"}
+                  </span>
+                  <Switch
+                    id="vendor-active-switch"
+                    checked={viewingVendor.active}
+                    className="data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-emerald-200"
+                    aria-label={`Set ${viewingVendor.name} ${viewingVendor.active ? "inactive" : "active"}`}
+                    onCheckedChange={(active) => {
+                      void run(
+                        async () => {
+                          await saveVendor({
+                            id: viewingVendor.id,
+                            name: viewingVendor.name,
+                            active,
+                          });
+                          setViewingVendor({ ...viewingVendor, active });
+                        },
+                        `Vendor ${active ? "activated" : "deactivated"}.`,
+                      );
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function Detail({ label, value }: { label: string; value: string | null | undefined }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="text-sm font-medium">{value?.trim() || "—"}</p>
     </div>
   );
 }

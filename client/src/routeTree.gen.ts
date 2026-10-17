@@ -56,11 +56,14 @@ import { Route as EworkPermitReportsRouteImport } from './routes/ework-permit.re
 import { Route as EworkPermitReviewRouteImport } from './routes/ework-permit.review'
 import { Route as EworkPermitSecurityRouteImport } from './routes/ework-permit.security'
 import { Route as EworkPermitSetupRouteImport } from './routes/ework-permit.setup'
+import { Route as GateTokenRouteImport } from './routes/gate.$token'
 import { Route as HdTicketIdRouteImport } from './routes/hd-ticket.$id'
 import { Route as PassIdRouteImport } from './routes/pass.$id'
 import { Route as VendorResponseTokenRouteImport } from './routes/vendor-response.$token'
 import { Route as VisitorsIndexRouteImport } from './routes/visitors.index'
 import { Route as VmsVisitIdRouteImport } from './routes/vms-visit.$id'
+import { Route as GateTokenIndexRouteImport } from './routes/gate.$token.index'
+import { Route as GateTokenVerifyRouteImport } from './routes/gate.$token.verify'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -297,6 +300,11 @@ const EworkPermitSetupRoute = EworkPermitSetupRouteImport.update({
   path: '/setup',
   getParentRoute: () => EworkPermitRoute,
 } as any)
+const GateTokenRoute = GateTokenRouteImport.update({
+  id: '/gate/$token',
+  path: '/gate/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HdTicketIdRoute = HdTicketIdRouteImport.update({
   id: '/hd-ticket/$id',
   path: '/hd-ticket/$id',
@@ -321,6 +329,16 @@ const VmsVisitIdRoute = VmsVisitIdRouteImport.update({
   id: '/vms-visit/$id',
   path: '/vms-visit/$id',
   getParentRoute: () => rootRouteImport,
+} as any)
+const GateTokenIndexRoute = GateTokenIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => GateTokenRoute,
+} as any)
+const GateTokenVerifyRoute = GateTokenVerifyRouteImport.update({
+  id: '/verify',
+  path: '/verify',
+  getParentRoute: () => GateTokenRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -369,6 +387,7 @@ export interface FileRoutesByFullPath {
   '/ework-permit/review': typeof EworkPermitReviewRoute
   '/ework-permit/security': typeof EworkPermitSecurityRoute
   '/ework-permit/setup': typeof EworkPermitSetupRoute
+  '/gate/$token': typeof GateTokenRouteWithChildren
   '/hd-ticket/$id': typeof HdTicketIdRoute
   '/pass/$id': typeof PassIdRoute
   '/vendor-response/$token': typeof VendorResponseTokenRoute
@@ -376,6 +395,8 @@ export interface FileRoutesByFullPath {
   '/emergency/': typeof EmergencyIndexRoute
   '/ework-permit/': typeof EworkPermitIndexRoute
   '/visitors/': typeof VisitorsIndexRoute
+  '/gate/$token/verify': typeof GateTokenVerifyRoute
+  '/gate/$token/': typeof GateTokenIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -427,6 +448,8 @@ export interface FileRoutesByTo {
   '/emergency': typeof EmergencyIndexRoute
   '/ework-permit': typeof EworkPermitIndexRoute
   '/visitors': typeof VisitorsIndexRoute
+  '/gate/$token/verify': typeof GateTokenVerifyRoute
+  '/gate/$token': typeof GateTokenIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -475,6 +498,7 @@ export interface FileRoutesById {
   '/ework-permit/review': typeof EworkPermitReviewRoute
   '/ework-permit/security': typeof EworkPermitSecurityRoute
   '/ework-permit/setup': typeof EworkPermitSetupRoute
+  '/gate/$token': typeof GateTokenRouteWithChildren
   '/hd-ticket/$id': typeof HdTicketIdRoute
   '/pass/$id': typeof PassIdRoute
   '/vendor-response/$token': typeof VendorResponseTokenRoute
@@ -482,6 +506,8 @@ export interface FileRoutesById {
   '/emergency/': typeof EmergencyIndexRoute
   '/ework-permit/': typeof EworkPermitIndexRoute
   '/visitors/': typeof VisitorsIndexRoute
+  '/gate/$token/verify': typeof GateTokenVerifyRoute
+  '/gate/$token/': typeof GateTokenIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -531,6 +557,7 @@ export interface FileRouteTypes {
     | '/ework-permit/review'
     | '/ework-permit/security'
     | '/ework-permit/setup'
+    | '/gate/$token'
     | '/hd-ticket/$id'
     | '/pass/$id'
     | '/vendor-response/$token'
@@ -538,6 +565,8 @@ export interface FileRouteTypes {
     | '/emergency/'
     | '/ework-permit/'
     | '/visitors/'
+    | '/gate/$token/verify'
+    | '/gate/$token/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -589,6 +618,8 @@ export interface FileRouteTypes {
     | '/emergency'
     | '/ework-permit'
     | '/visitors'
+    | '/gate/$token/verify'
+    | '/gate/$token'
   id:
     | '__root__'
     | '/'
@@ -636,6 +667,7 @@ export interface FileRouteTypes {
     | '/ework-permit/review'
     | '/ework-permit/security'
     | '/ework-permit/setup'
+    | '/gate/$token'
     | '/hd-ticket/$id'
     | '/pass/$id'
     | '/vendor-response/$token'
@@ -643,6 +675,8 @@ export interface FileRouteTypes {
     | '/emergency/'
     | '/ework-permit/'
     | '/visitors/'
+    | '/gate/$token/verify'
+    | '/gate/$token/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -679,6 +713,7 @@ export interface RootRouteChildren {
   VmsReportsRoute: typeof VmsReportsRoute
   VmsTodayRoute: typeof VmsTodayRoute
   VmsUpcomingRoute: typeof VmsUpcomingRoute
+  GateTokenRoute: typeof GateTokenRouteWithChildren
   HdTicketIdRoute: typeof HdTicketIdRoute
   PassIdRoute: typeof PassIdRoute
   VendorResponseTokenRoute: typeof VendorResponseTokenRoute
@@ -1016,6 +1051,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof EworkPermitSetupRouteImport
       parentRoute: typeof EworkPermitRoute
     }
+    '/gate/$token': {
+      id: '/gate/$token'
+      path: '/gate/$token'
+      fullPath: '/gate/$token'
+      preLoaderRoute: typeof GateTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/hd-ticket/$id': {
       id: '/hd-ticket/$id'
       path: '/hd-ticket/$id'
@@ -1050,6 +1092,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/vms-visit/$id'
       preLoaderRoute: typeof VmsVisitIdRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/gate/$token/': {
+      id: '/gate/$token/'
+      path: '/'
+      fullPath: '/gate/$token/'
+      preLoaderRoute: typeof GateTokenIndexRouteImport
+      parentRoute: typeof GateTokenRoute
+    }
+    '/gate/$token/verify': {
+      id: '/gate/$token/verify'
+      path: '/verify'
+      fullPath: '/gate/$token/verify'
+      preLoaderRoute: typeof GateTokenVerifyRouteImport
+      parentRoute: typeof GateTokenRoute
     }
   }
 }
@@ -1114,6 +1170,20 @@ const VisitorsRouteWithChildren = VisitorsRoute._addFileChildren(
   VisitorsRouteChildren,
 )
 
+interface GateTokenRouteChildren {
+  GateTokenVerifyRoute: typeof GateTokenVerifyRoute
+  GateTokenIndexRoute: typeof GateTokenIndexRoute
+}
+
+const GateTokenRouteChildren: GateTokenRouteChildren = {
+  GateTokenVerifyRoute: GateTokenVerifyRoute,
+  GateTokenIndexRoute: GateTokenIndexRoute,
+}
+
+const GateTokenRouteWithChildren = GateTokenRoute._addFileChildren(
+  GateTokenRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ActivityRoute: ActivityRoute,
@@ -1148,6 +1218,7 @@ const rootRouteChildren: RootRouteChildren = {
   VmsReportsRoute: VmsReportsRoute,
   VmsTodayRoute: VmsTodayRoute,
   VmsUpcomingRoute: VmsUpcomingRoute,
+  GateTokenRoute: GateTokenRouteWithChildren,
   HdTicketIdRoute: HdTicketIdRoute,
   PassIdRoute: PassIdRoute,
   VendorResponseTokenRoute: VendorResponseTokenRoute,

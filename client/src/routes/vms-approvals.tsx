@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useApp } from "@/context/app-context";
+import { ApiError } from "@/lib/api";
+import { VisitorInvitationDialog } from "@/components/visits/VisitorInvitationDialog";
 import { approveVisitRequest, canDecide, listVisitorTypes, listVisitRequests, rejectVisitRequest, type VisitRequest } from "@/services/visitor-requests";
 
 export const Route = createFileRoute("/vms-approvals")({
@@ -35,6 +37,7 @@ function Approvals() {
   const { data = [], isLoading } = useQuery({ queryKey: ["visit-requests"], queryFn: listVisitRequests });
   const { data: types = [] } = useQuery({ queryKey: ["visitor-types"], queryFn: listVisitorTypes });
   const [rejecting, setRejecting] = useState<VisitRequest | null>(null);
+  const [invitation, setInvitation] = useState<VisitRequest | null>(null);
   const [reason, setReason] = useState("");
   const pending = data.filter((v) => v.status === "PENDING" && canDecide(user, v) && (v.host_id === user?.id || user?.role !== "EMPLOYEE"));
 
@@ -43,6 +46,43 @@ function Approvals() {
     catch (e) {
       await qc.invalidateQueries({ queryKey: ["visit-requests"] });
       toast.error(e instanceof Error ? e.message : "Action failed.");
+    }
+  };
+  const approve = async (visit: VisitRequest) => {
+    if (!user) return;
+    try {
+      const approvedVisit = await approveVisitRequest(visit.id, user);
+      setInvitation(approvedVisit);
+      toast.success(
+        approvedVisit.invitation_sent_at
+          ? `${visit.visitor_name} approved - invitation sent`
+          : `${visit.visitor_name} approved - invitation screen opened`,
+      );
+      await qc.invalidateQueries();
+    } catch (error) {
+      await qc.invalidateQueries({ queryKey: ["visit-requests"] });
+      if (
+        error instanceof ApiError &&
+        error.status === 502 &&
+        error.message.includes("Visit approved")
+      ) {
+        try {
+          const approvedVisit = (await listVisitRequests()).find((item) => item.id === visit.id);
+          if (approvedVisit) setInvitation(approvedVisit);
+          toast.error(
+            approvedVisit
+              ? "The request was approved, but its email failed. Retry from the invitation screen."
+              : "The request was approved, but its email failed. Refresh the visitor list and resend the invitation.",
+          );
+          return;
+        } catch {
+          toast.error(
+            "The request was approved, but its email failed. Refresh the visitor list and resend the invitation.",
+          );
+          return;
+        }
+      }
+      toast.error(error instanceof Error ? error.message : "Could not approve this request.");
     }
   };
 
@@ -74,7 +114,7 @@ function Approvals() {
                 ].map(([k, val]) => <div key={k} className="contents"><dt className="text-muted-foreground">{k}</dt><dd>{val || "—"}</dd></div>)}
               </dl>
               <div className="flex gap-2">
-                <Button className="flex-1" onClick={() => void run(() => approveVisitRequest(v.id, user!), `${v.visitor_name} approved — QR issued`)}><CheckCircle2 className="size-4" /> Approve</Button>
+                <Button className="flex-1" onClick={() => void approve(v)}><CheckCircle2 className="size-4" /> Approve</Button>
                 <Button className="flex-1" variant="outline" onClick={() => { setReason(""); setRejecting(v); }}><XCircle className="size-4" /> Reject</Button>
               </div>
             </article>
@@ -90,6 +130,11 @@ function Approvals() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <VisitorInvitationDialog
+        visit={invitation}
+        open={!!invitation}
+        onOpenChange={(open) => !open && setInvitation(null)}
+      />
     </div>
   );
 }

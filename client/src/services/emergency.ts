@@ -126,6 +126,10 @@ export const configService = {
       : await localDb.from("emg_incident_types").insert(t);
     fail(error);
   },
+  async deleteType(id: string) {
+    const { error } = await localDb.from("emg_incident_types").delete().eq("id", id);
+    fail(error);
+  },
   async assemblyPoints(all = false) {
     let q = localDb.from("emg_assembly_points").select("*").order("name");
     if (!all) q = q.eq("active", true);
@@ -137,6 +141,10 @@ export const configService = {
     const { error } = a.id
       ? await localDb.from("emg_assembly_points").update(a).eq("id", a.id)
       : await localDb.from("emg_assembly_points").insert(a);
+    fail(error);
+  },
+  async deleteAssemblyPoint(id: string) {
+    const { error } = await localDb.from("emg_assembly_points").delete().eq("id", id);
     fail(error);
   },
 };

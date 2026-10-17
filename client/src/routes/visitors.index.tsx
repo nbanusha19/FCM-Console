@@ -18,6 +18,7 @@ import { toast } from "sonner";
 import { AppPage } from "@/components/layout/AppPage";
 import { NewRequestDialog } from "@/components/visits/NewRequestDialog";
 import { VisitorPassDialog } from "@/components/visits/VisitorPassDialog";
+import { VisitorInvitationDialog } from "@/components/visits/VisitorInvitationDialog";
 import { StatusPill } from "@/components/common/StatusBadge";
 import { EmptyRow } from "@/components/common/TableCard";
 import { PageSizeSelect } from "@/components/common/PageSizeSelect";
@@ -34,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useApp } from "@/context/app-context";
+import { ApiError } from "@/lib/api";
 import { statusLabel, VISIT_STATUS_KEYS } from "@/constants/visit-status";
 import { isSelectableVisitorType } from "@/constants/visitor-types";
 import { formatDate, formatTime, initials } from "@/lib/format";
@@ -95,6 +97,7 @@ function VisitorsPage() {
   const [creating, setCreating] = useState(false);
   const [rejecting, setRejecting] = useState<VisitRequest | null>(null);
   const [pass, setPass] = useState<VisitRequest | null>(null);
+  const [invitation, setInvitation] = useState<VisitRequest | null>(null);
   const [reason, setReason] = useState("");
   const reviewer = isVisitReviewer(user);
   const canCreateRequest = canCreateVisitRequest(user);
@@ -120,6 +123,43 @@ function VisitorsPage() {
     } catch (cause) {
       await queryClient.invalidateQueries({ queryKey: ["visit-requests"] });
       toast.error(cause instanceof Error ? cause.message : "Action failed.");
+    }
+  };
+  const approve = async (visit: VisitRequest) => {
+    if (!user) return;
+    try {
+      const approvedVisit = await approveVisitRequest(visit.id, user);
+      setInvitation(approvedVisit);
+      toast.success(
+        approvedVisit.invitation_sent_at
+          ? `${visit.visitor_name} approved - invitation sent`
+          : `${visit.visitor_name} approved - invitation screen opened`,
+      );
+      await reload();
+    } catch (cause) {
+      await queryClient.invalidateQueries({ queryKey: ["visit-requests"] });
+      if (
+        cause instanceof ApiError &&
+        cause.status === 502 &&
+        cause.message.includes("Visit approved")
+      ) {
+        try {
+          const approvedVisit = (await listVisitRequests()).find((item) => item.id === visit.id);
+          if (approvedVisit) setInvitation(approvedVisit);
+          toast.error(
+            approvedVisit
+              ? "The request was approved, but its email failed. Retry from the invitation screen."
+              : "The request was approved, but its email failed. Refresh the visitor list and resend the invitation.",
+          );
+          return;
+        } catch {
+          toast.error(
+            "The request was approved, but its email failed. Refresh the visitor list and resend the invitation.",
+          );
+          return;
+        }
+      }
+      toast.error(cause instanceof Error ? cause.message : "Could not approve this request.");
     }
   };
 
@@ -309,7 +349,7 @@ function VisitorsPage() {
                             </DropdownMenuItem>
                             {user?.role !== "EMPLOYEE" && canDecide(user, visit) && visit.status === "PENDING" ? (
                               <>
-                                <DropdownMenuItem onClick={() => void run(() => approveVisitRequest(visit.id, user!), "Request approved")}>
+                                <DropdownMenuItem onClick={() => void approve(visit)}>
                                   <CheckCircle2 className="size-3.5" /> Approve
                                 </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => { setReason(""); setRejecting(visit); }}>
@@ -372,6 +412,11 @@ function VisitorsPage() {
           void queryClient.invalidateQueries({ queryKey: ["visit-requests"] });
           void queryClient.invalidateQueries({ queryKey: ["guest-cards"] });
         }}
+      />
+      <VisitorInvitationDialog
+        visit={invitation}
+        open={!!invitation}
+        onOpenChange={(open) => !open && setInvitation(null)}
       />
       <Dialog open={!!rejecting} onOpenChange={(open) => !open && setRejecting(null)}>
         <DialogContent>

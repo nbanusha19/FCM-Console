@@ -654,14 +654,14 @@ def _apply_internal_visitor(cur: Any, row_data: dict[str, Any]) -> None:
     )
 
 
-def _visitor_checkin_url(visit_id: str, token: str) -> str:
+def _visitor_checkin_url(token: str) -> str:
     origin = settings.public_app_url
     parsed = urllib.parse.urlsplit(origin)
     if parsed.scheme not in {"https", "http"} or not parsed.netloc:
         raise RuntimeError("Set PUBLIC_APP_URL to the public client URL before sending visitor invitations.")
     if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise RuntimeError("PUBLIC_APP_URL must use HTTPS outside local development.")
-    return f"{origin}/pass/{urllib.parse.quote(visit_id, safe='')}#token={token}"
+    return f"{origin.rstrip('/')}/gate/{urllib.parse.quote(token, safe='')}/verify"
 
 
 def _visitor_qr_token(visit_id: str) -> str:
@@ -686,7 +686,7 @@ def _send_visitor_invitation(visit: dict[str, Any], token: str) -> str:
 
     import qrcode
 
-    url = _visitor_checkin_url(str(visit["id"]), token)
+    url = _visitor_checkin_url(token)
     qr = qrcode.make(url)
     image = io.BytesIO()
     qr.save(image, format="PNG")
@@ -1066,8 +1066,10 @@ def _send_helpdesk_closed_ticket_emails(
             key = email.casefold()
             if key not in unique_recipients:
                 unique_recipients[key] = {**recipient, "Email": email}
-            elif recipient.get("PublicRequester"):
-                unique_recipients[key]["PublicRequester"] = True
+            else:
+                for marker in ("PublicRequester", "TicketRaiser"):
+                    if recipient.get(marker):
+                        unique_recipients[key][marker] = True
 
     for recipient in unique_recipients.values():
         ticket_url = app_ticket_url
@@ -1084,6 +1086,24 @@ def _send_helpdesk_closed_ticket_emails(
                         }
                     ),
                 )
+        recipient_feedback_url = feedback_url
+        if (
+            recipient.get("TicketRaiser")
+            and settings.public_app_url
+            and ticket.get("building_id")
+            and ticket.get("id")
+        ):
+            recipient_feedback_url = urllib.parse.urljoin(
+                settings.public_app_url.rstrip("/") + "/",
+                "hd-raise?"
+                + urllib.parse.urlencode(
+                    {
+                        "building": str(ticket["building_id"]),
+                        "ticket": str(ticket["id"]),
+                    }
+                ),
+            )
+            ticket_url = None
         message = EmailMessage()
         message["Subject"] = f"Helpdesk ticket closed — {ticket_no}"
         message["From"] = settings.smtp_from_email
@@ -1095,8 +1115,8 @@ def _send_helpdesk_closed_ticket_emails(
         )
         if ticket_url:
             body += f"\nView ticket: {ticket_url}\n"
-        if feedback_url:
-            body += f"Share feedback: {feedback_url}\n"
+        if recipient_feedback_url:
+            body += f"Share feedback: {recipient_feedback_url}\n"
         message.set_content(body)
         message.add_alternative(
             branded_email_html(
@@ -1113,10 +1133,10 @@ def _send_helpdesk_closed_ticket_emails(
                     else ""
                 )
                 + (
-                    f'<p><a href="{safe(feedback_url)}" style="display:inline-block;padding:12px 20px;'
+                    f'<p><a href="{safe(recipient_feedback_url)}" style="display:inline-block;padding:12px 20px;'
                     'background-color:#e8f0ff;color:#155eef;text-decoration:none;font-weight:bold;'
                     f'border-radius:6px">Share your feedback</a></p>'
-                    if feedback_url
+                    if recipient_feedback_url
                     else ""
                 ),
                 preheader=f"Helpdesk ticket {ticket_no} has been resolved and closed.",
@@ -1961,6 +1981,20 @@ def _public_visit_by_token(cur: Any, visit_id: str, token: str) -> dict[str, Any
     return row
 
 
+def _public_visit_by_qr_token(cur: Any, token: str) -> dict[str, Any]:
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    cur.execute("SELECT * FROM [dbo].[Visits] WHERE [QrTokenHash] = ?", digest)
+    rows = rows_as_dicts(cur)
+    if not rows:
+        raise HTTPException(status_code=404, detail="This visitor pass is invalid or has expired.")
+    row = rows[0]
+    if row.get("Status") not in {"APPROVED", "CARD_ISSUED", "CHECKED_IN", "CHECKED_OUT"}:
+        raise HTTPException(status_code=410, detail="This visitor pass is no longer active.")
+    if _json_value(row.get("VisitDate")) < date.today().isoformat():
+        raise HTTPException(status_code=410, detail="This visitor pass has expired.")
+    return row
+
+
 def _visitor_checkin_otp_hash(visit_id: str, email: str, code: str) -> str:
     if not settings.jwt_secret or len(settings.jwt_secret) < 32:
         raise HTTPException(
@@ -1997,7 +2031,7 @@ def _send_visitor_checkin_otp_email(email: str, code: str, visit: dict[str, Any]
         f"Hello {visitor_name},\n\n"
         f"Your VMS check-in verification code is {code}.\n"
         "It expires in 10 minutes and can be used once. "
-        "Enter it on the visitor check-in page to complete check-in.\n\n"
+        "Enter it on the visitor check-in page to verify your email, then confirm check-in.\n\n"
         "If you did not request this code, you can ignore this email."
     )
     message.add_alternative(
@@ -2006,7 +2040,7 @@ def _send_visitor_checkin_otp_email(email: str, code: str, visit: dict[str, Any]
             "Verify your visitor check-in",
             f"Hello {visitor_name}, your check-in verification code is:",
             code,
-            "This code expires in 10 minutes and can be used once. Enter it on the visitor check-in page. If you did not request it, you can ignore this email.",
+            "This code expires in 10 minutes and can be used once. Enter it on the visitor check-in page to verify your email, then confirm check-in. If you did not request it, you can ignore this email.",
             preheader="Your visitor check-in verification code.",
         ),
         subtype="html",
@@ -3185,7 +3219,9 @@ def _require_visitor_checkin_window(
         raise HTTPException(status_code=409, detail=message)
 
 
-def _public_visit_payload(row: dict[str, Any]) -> dict[str, Any]:
+def _public_visit_payload(
+    row: dict[str, Any], check_in_verified: bool = False
+) -> dict[str, Any]:
     visit = _normalize("visit_requests", row, None)
     checkin_available, checkin_window_message = _visitor_checkin_window(row)
     payload = {
@@ -3206,7 +3242,22 @@ def _public_visit_payload(row: dict[str, Any]) -> dict[str, Any]:
         if visit.get("status") in {"APPROVED", "CARD_ISSUED"}
         else ""
     )
+    payload["check_in_verified"] = check_in_verified
     return payload
+
+
+def _visitor_checkin_otp_verified(cur: Any, visit_id: str) -> bool:
+    cur.execute(
+        """
+        SELECT CASE WHEN [UsedAt] >= DATEADD(MINUTE, -10, SYSUTCDATETIME())
+                    THEN 1 ELSE 0 END
+        FROM [dbo].[VmsVisitorCheckInOtpChallenges]
+        WHERE [VisitId] = ?
+        """,
+        visit_id,
+    )
+    row = cur.fetchone()
+    return bool(row and row[0])
 
 
 @app.post("/api/public/visits/{visit_id}/pass")
@@ -3216,12 +3267,33 @@ def public_visitor_pass(
         try:
             with cursor() as cur:
                 row = _public_visit_by_token(cur, visit_id, body.token)
-                return _public_visit_payload(row)
+                verified = (
+                    row.get("Status") in {"APPROVED", "CARD_ISSUED"}
+                    and _visitor_checkin_otp_verified(cur, visit_id)
+                )
+                return _public_visit_payload(row, verified)
         except HTTPException:
             raise
         except Exception as exc:
             logger.exception("Public visitor pass lookup failed")
             raise HTTPException(status_code=503, detail="Unable to load this visitor pass.") from exc
+
+
+@app.get("/api/public/visitor-passes/{token}")
+def public_visitor_pass_by_qr_token(token: str) -> dict[str, Any]:
+    try:
+        with cursor() as cur:
+            row = _public_visit_by_qr_token(cur, token)
+            verified = (
+                row.get("Status") in {"APPROVED", "CARD_ISSUED"}
+                and _visitor_checkin_otp_verified(cur, str(row["Id"]))
+            )
+            return _public_visit_payload(row, verified)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public visitor pass lookup by QR token failed")
+        raise HTTPException(status_code=503, detail="Unable to load this visitor pass.") from exc
 
 
 @app.post("/api/public/visits/{visit_id}/check-in/otp")
@@ -3378,73 +3450,107 @@ def verify_visitor_checkin_otp(
                         status_code=409,
                         detail="This check-in code has expired or has already been used.",
                     )
-                cur.execute(
-                    """
-                    UPDATE [dbo].[Visits]
-                    SET [Status] = 'CHECKED_IN', [CheckedInAt] = SYSUTCDATETIME(),
-                        [CheckedInByName] = 'Visitor QR OTP',
-                        [ArrivedAt] = SYSUTCDATETIME(), [ArrivedByName] = 'Visitor QR OTP',
-                        [ArrivalGate] = 'Visitor QR OTP self check-in',
-                        [UpdatedAt] = SYSUTCDATETIME()
-                    WHERE [Id] = ? AND [QrTokenHash] = ?
-                      AND [Status] IN ('APPROVED', 'CARD_ISSUED')
-                      AND [VisitDate] = CONVERT(date, DATEADD(MINUTE, 330, SYSUTCDATETIME()))
-                      AND CONVERT(time(0), DATEADD(MINUTE, 330, SYSUTCDATETIME())) >= [ExpectedArrival]
-                      AND CONVERT(time(0), DATEADD(MINUTE, 330, SYSUTCDATETIME())) < [ExpectedDeparture]
-                    """,
-                    visit_id,
-                    hashlib.sha256(body.token.encode()).hexdigest(),
-                )
-                if cur.rowcount == 0:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="This visit must be approved and within its scheduled check-in window.",
-                    )
-                cur.execute(
-                    """
-                    INSERT INTO [dbo].[ModuleEvents]
-                        ([Id], [ModuleName], [RecordId], [Action], [Note],
-                         [ActorUserId], [ActorName], [CreatedAt])
-                    VALUES (NEWID(), 'VISIT', ?, 'CHECKED_IN',
-                            'Checked in using visitor QR and email OTP',
-                            NULL, 'Visitor QR OTP', SYSUTCDATETIME())
-                    """,
-                    visit_id,
-                )
                 cur.execute("SELECT * FROM [dbo].[Visits] WHERE [Id] = ?", visit_id)
                 updated = rows_as_dicts(cur)
                 if not updated:
                     raise HTTPException(status_code=404, detail="Visitor request not found.")
-                _append_vms_notification(
-                    cur,
-                    visit,
-                    kind="CHECKED_IN",
-                    title="Visitor checked in",
-                    body=f"{visit.get('VisitorName') or 'Visitor'} checked in after email OTP verification.",
-                )
-                result = _public_visit_payload(updated[0])
+                result = _public_visit_payload(updated[0], check_in_verified=True)
         if failure:
             raise HTTPException(status_code=failure[0], detail=failure[1])
         if result is None:
-            raise HTTPException(status_code=503, detail="Unable to complete visitor check-in.")
+            raise HTTPException(status_code=503, detail="Unable to verify the visitor email.")
         return result
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Visitor check-in OTP verification failed for visit %s", visit_id)
         raise HTTPException(
-            status_code=503, detail="Unable to verify the code and check in the visitor."
+            status_code=503, detail="Unable to verify the visitor email."
         ) from exc
 
 
 @app.post("/api/public/visits/{visit_id}/check-in")
 def public_visitor_check_in(
-        visit_id: str, body: VisitorTokenRequest
+        visit_id: str, body: VisitorCheckInOtpRequest
 ) -> dict[str, Any]:
-        raise HTTPException(
-            status_code=403,
-            detail="QR-only check-in is disabled. Request and verify the location-bound email OTP.",
-        )
+    try:
+        with cursor() as cur:
+            visit = _public_visit_by_token(cur, visit_id, body.token)
+            if visit.get("Status") not in {"APPROVED", "CARD_ISSUED"}:
+                raise HTTPException(status_code=409, detail="This visit is no longer available for check-in.")
+            _require_visitor_checkin_window(visit)
+            _require_visitor_inside_geofence(cur, visit, body.latitude, body.longitude)
+            email = str(visit.get("Email") or "").strip()
+            cur.execute(
+                """
+                SELECT [RecipientEmail], [UsedAt]
+                FROM [dbo].[VmsVisitorCheckInOtpChallenges] WITH (UPDLOCK, HOLDLOCK)
+                WHERE [VisitId] = ? AND [UsedAt] IS NOT NULL
+                  AND [UsedAt] >= DATEADD(MINUTE, -10, SYSUTCDATETIME())
+                """,
+                visit_id,
+            )
+            challenge = cur.fetchone()
+            if not challenge:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Verify the visitor email code before checking in.",
+                )
+            if str(challenge[0] or "").casefold() != email.casefold():
+                raise HTTPException(
+                    status_code=409,
+                    detail="The visitor email on this request has changed. Ask the host to resend the pass.",
+                )
+            cur.execute(
+                """
+                UPDATE [dbo].[Visits]
+                SET [Status] = 'CHECKED_IN', [CheckedInAt] = SYSUTCDATETIME(),
+                    [CheckedInByName] = 'Visitor QR OTP',
+                    [ArrivedAt] = SYSUTCDATETIME(), [ArrivedByName] = 'Visitor QR OTP',
+                    [ArrivalGate] = 'Visitor QR OTP self check-in',
+                    [UpdatedAt] = SYSUTCDATETIME()
+                WHERE [Id] = ? AND [QrTokenHash] = ?
+                  AND [Status] IN ('APPROVED', 'CARD_ISSUED')
+                  AND [VisitDate] = CONVERT(date, DATEADD(MINUTE, 330, SYSUTCDATETIME()))
+                  AND CONVERT(time(0), DATEADD(MINUTE, 330, SYSUTCDATETIME())) >= [ExpectedArrival]
+                  AND CONVERT(time(0), DATEADD(MINUTE, 330, SYSUTCDATETIME())) < [ExpectedDeparture]
+                """,
+                visit_id,
+                hashlib.sha256(body.token.encode()).hexdigest(),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This visit must be approved and within its scheduled check-in window.",
+                )
+            cur.execute(
+                """
+                INSERT INTO [dbo].[ModuleEvents]
+                    ([Id], [ModuleName], [RecordId], [Action], [Note],
+                     [ActorUserId], [ActorName], [CreatedAt])
+                VALUES (NEWID(), 'VISIT', ?, 'CHECKED_IN',
+                        'Checked in using visitor QR and email OTP',
+                        NULL, 'Visitor QR OTP', SYSUTCDATETIME())
+                """,
+                visit_id,
+            )
+            cur.execute("SELECT * FROM [dbo].[Visits] WHERE [Id] = ?", visit_id)
+            updated = rows_as_dicts(cur)
+            if not updated:
+                raise HTTPException(status_code=404, detail="Visitor request not found.")
+            _append_vms_notification(
+                cur,
+                visit,
+                kind="CHECKED_IN",
+                title="Visitor checked in",
+                body=f"{visit.get('VisitorName') or 'Visitor'} checked in after email OTP verification.",
+            )
+            return _public_visit_payload(updated[0])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public visitor check-in failed")
+        raise HTTPException(status_code=503, detail="Unable to check in with this visitor pass.") from exc
 
 
 @app.post("/api/public/visits/{visit_id}/check-out")
@@ -3965,7 +4071,7 @@ def approve_visit(
                         visit_id,
                     )
                     visit["emailSentAt"] = datetime.now(timezone.utc).isoformat()
-                    visit["portalUrl"] = _visitor_checkin_url(visit_id, qr_token)
+                    visit["portalUrl"] = _visitor_checkin_url(qr_token)
                 manager_notification_status = _notify_branch_managers_of_approved_visit(
                     cur, visit
                 )
@@ -4220,7 +4326,7 @@ def resend_visit_invite(
                         audience=["ADMIN", "SECURITY", "BRANCH_MANAGER"],
                     )
                     visit["emailSentAt"] = datetime.now(timezone.utc).isoformat()
-                    visit["portalUrl"] = _visitor_checkin_url(visit_id, qr_token)
+                    visit["portalUrl"] = _visitor_checkin_url(qr_token)
         except HTTPException:
             raise
         except Exception as exc:
@@ -4265,7 +4371,7 @@ def get_visitor_pass_link(
                 token_hash = hashlib.sha256(token.encode()).hexdigest()
                 if not hmac.compare_digest(str(row.QrTokenHash or ""), token_hash):
                     return {"portalUrl": None}
-                return {"portalUrl": _visitor_checkin_url(visit_id, token)}
+                return {"portalUrl": _visitor_checkin_url(token)}
         except HTTPException:
             raise
         except Exception as exc:
@@ -5993,6 +6099,7 @@ def database_query(
                                         "PublicRequester": not bool(
                                             str(previous.get("RaisedByUserId") or "").strip()
                                         ),
+                                        "TicketRaiser": True,
                                     }
                                 )
                             if background_tasks is None:

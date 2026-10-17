@@ -20,6 +20,7 @@ export interface PublicVisitorPass {
   host_name: string;
   status: string;
   check_in_available: boolean;
+  check_in_verified: boolean;
   check_in_window_message: string;
   checked_in_at: string | null;
   checked_out_at: string | null;
@@ -30,6 +31,13 @@ export async function getVisitorPass({ data }: { data: { id: string; token: stri
   return apiRequest<PublicVisitorPass>(`/public/visits/${encodeURIComponent(id)}/pass`, {
     method: "POST",
     body: JSON.stringify({ token }),
+    auth: false,
+  });
+}
+
+export async function getVisitorPassByQrToken(token: string) {
+  const validToken = z.string().min(32).max(128).parse(token);
+  return apiRequest<PublicVisitorPass>(`/public/visitor-passes/${encodeURIComponent(validToken)}`, {
     auth: false,
   });
 }
@@ -65,6 +73,18 @@ export async function verifyVisitorCheckInOtp(
   return apiRequest<PublicVisitorPass>(`/public/visits/${encodeURIComponent(id)}/check-in/verify`, {
     method: "POST",
     body: JSON.stringify({ token, code, ...location }),
+    auth: false,
+  });
+}
+
+export async function checkInVisitorWithEmailPass(
+  id: string,
+  token: string,
+  location: VisitorLocation,
+) {
+  return apiRequest<PublicVisitorPass>(`/public/visits/${encodeURIComponent(id)}/check-in`, {
+    method: "POST",
+    body: JSON.stringify({ token, ...location }),
     auth: false,
   });
 }

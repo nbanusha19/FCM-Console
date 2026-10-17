@@ -5,6 +5,7 @@ import { CalendarClock, UsersRound, UserRoundCheck } from "lucide-react";
 import { AppPage } from "@/components/layout/AppPage";
 import { StatusPill } from "@/components/common/StatusBadge";
 import { VisitList } from "@/components/visits/VisitList";
+import { isFinished } from "@/constants/visit-status";
 import { durationBetween, formatTime, initials, nowMinutes, timeToMinutes } from "@/lib/format";
 import { listGuestCards, listVisitRequests, type VisitRequest } from "@/services/visitor-requests";
 import type { LucideIcon } from "lucide-react";
@@ -30,7 +31,8 @@ export const Route = createFileRoute("/vms-today")({
 function CurrentlyInside() {
   const { data: visits = [], isLoading } = useQuery({ queryKey: ["visit-requests"], queryFn: listVisitRequests });
   const { data: cards = [] } = useQuery({ queryKey: ["guest-cards"], queryFn: listGuestCards });
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const inside = visits
     .filter((visit) => visit.status === "CHECKED_IN" && !visit.checked_out_at)
     .sort((a, b) => (a.checked_in_at ?? "").localeCompare(b.checked_in_at ?? ""));
@@ -94,7 +96,7 @@ function CurrentlyInside() {
       <section className="space-y-2" aria-label="Today's scheduled visits">
         <h2 className="text-[14px] font-semibold">Today&apos;s scheduled visits</h2>
         <VisitList
-          preset={(visit) => visit.visit_date === today}
+          preset={(visit) => visit.visit_date === today && !isFinished(visit.status)}
           columns={["visitor", "host", "company", "date", "time", "status", "checkin", "checkout", "card", "location"]}
           showDateRange={false}
           showTypeFilter

@@ -15,7 +15,7 @@ const EWP_ALL = s("/ework-permit/all", "All permits");
 const EWP_REVIEW = s("/ework-permit/review", "Pending HSE review");
 const EWP_SEC = s("/ework-permit/security", "Gate verification");
 const EWP_REP = s("/ework-permit/reports", "Permit reports");
-const EWP_SET = s("/ework-permit/setup", "Vendors & locations");
+const EWP_SET = s("/ework-permit/setup", "Vendors");
 const EMG: NavItem = { to: "/emergency", label: "Dashboard" };
 const EMG_WARDEN: NavItem[] = [
   EMG,

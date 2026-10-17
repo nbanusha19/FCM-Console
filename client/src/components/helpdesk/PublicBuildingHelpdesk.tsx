@@ -206,10 +206,13 @@ export function PublicBuildingHelpdesk({
       if (ticketId) {
         setMode("myTickets");
         const linkedTicket = ownTickets.find((ticket) => ticket.id === ticketId);
-        if (linkedTicket) {
-          await openTicketHistory(linkedTicket, verifiedToken);
+        if (linkedTicket?.status === "CLOSED" && !linkedTicket.feedback_submitted) {
+          setSelectedTicketId(linkedTicket.id);
+          setMode("feedback");
+        } else if (linkedTicket?.feedback_submitted) {
+          toast.info("Feedback has already been submitted for this ticket.");
         } else {
-          toast.error("This ticket was not found for the verified email address.");
+          toast.error("This closed ticket was not found for the verified email address.");
         }
       }
     } catch (error) {
