@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pencil, Plus, Tags, Trash2 } from "lucide-react";
+import { Eye, Pencil, Plus, Tags, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AppPage } from "@/components/layout/AppPage";
 import { PageHeader } from "@/components/common/PageHeader";
-import { StatusPill } from "@/components/common/StatusBadge";
+import { MasterViewDialog } from "@/components/masters/MasterViewDialog";
+import { MasterDeleteButton } from "@/components/masters/MasterDeleteButton";
+import { MasterStatusSwitch } from "@/components/masters/MasterStatusSwitch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,12 +46,12 @@ import type { ReactNode } from "react";
 export const Route = createFileRoute("/hd-categories")({
   head: () => ({
     meta: [
-      { title: "Service categories — FCM Helpdesk" },
+      { title: "Service Categories Master — FCM Helpdesk" },
       {
         name: "description",
         content: "Configure helpdesk categories, sub-categories, services and provider mapping.",
       },
-      { property: "og:title", content: "Service categories" },
+      { property: "og:title", content: "Service Categories Master" },
       { property: "og:description", content: "Configure the helpdesk service catalog." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -73,14 +75,16 @@ export function CategoriesPage({
   const [subcategories, setSubcategories] = useState<HdSubcategory[]>([]);
   const [services, setServices] = useState<HdService[]>([]);
   const [providers, setProviders] = useState<HdProvider[]>([]);
-  const [q, setQ] = useState("");
   const [editing, setEditing] = useState<{
     category: HdCategory;
     subcategory: HdSubcategory | null;
   } | null>(null);
-  const [creatingCatalogItem, setCreatingCatalogItem] = useState<"category" | "subcategory" | null>(
-    null,
-  );
+  const [viewing, setViewing] = useState<{
+    category: HdCategory;
+    subcategory: HdSubcategory | null;
+    active: boolean;
+  } | null>(null);
+  const [creatingCategory, setCreatingCategory] = useState(false);
   const [serviceEditing, setServiceEditing] = useState<HdService | null>(null);
 
   const reload = useCallback(() => {
@@ -140,67 +144,63 @@ export function CategoriesPage({
         });
       }
     }
-    return entries
-      .filter(
-        (row) =>
-          !q.trim() ||
-          [row.category.name, row.subcategory?.name ?? ""]
-            .join(" ")
-            .toLowerCase()
-            .includes(q.trim().toLowerCase()),
-      )
-      .sort(
-        (a, b) =>
-          a.category.name.localeCompare(b.category.name) ||
-          (a.subcategory?.name ?? "").localeCompare(b.subcategory?.name ?? ""),
-      );
-  }, [categories, subcategories, services, q]);
+    return entries.sort(
+      (a, b) =>
+        a.category.name.localeCompare(b.category.name) ||
+        (a.subcategory?.name ?? "").localeCompare(b.subcategory?.name ?? ""),
+    );
+  }, [categories, subcategories, services]);
   const paged = usePaged(rows);
+  const setCatalogRowActive = async (
+    row: (typeof rows)[number],
+    active: boolean,
+  ): Promise<void> => {
+    if (row.subcategory) {
+      if (active && !row.category.active) {
+        await catalogService.saveCategory({ ...row.category, active: true });
+      }
+      await catalogService.saveSubcategory({ ...row.subcategory, active });
+    } else {
+      await catalogService.saveCategory({ ...row.category, active });
+    }
+    await reload();
+    toast.success(
+      `${row.subcategory ? "Sub-category" : "Category"} ${active ? "activated" : "deactivated"}.`,
+    );
+  };
+  const removeCatalogRow = async (row: (typeof rows)[number]): Promise<void> => {
+    if (row.subcategory) {
+      await catalogService.deleteSubcategory(row.subcategory.id);
+      toast.success("Sub-category deleted.");
+    } else {
+      await catalogService.deleteCategory(row.category.id);
+      toast.success("Category deleted.");
+    }
+    await reload();
+  };
 
   return (
     <div className="space-y-6">
       {!embedded ? (
         <PageHeader
           eyebrow="FCM Helpdesk"
-          title="Service categories"
+          title="Service Categories Master"
           subtitle="Manage service categories and sub-categories."
-          actions={
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => setCreatingCatalogItem("category")}>
-                <Plus className="size-4" /> Add category
-              </Button>
-              <Button
-                disabled={!categories.length}
-                onClick={() => setCreatingCatalogItem("subcategory")}
-              >
-                <Plus className="size-4" /> Add sub-category
-              </Button>
-            </div>
-          }
         />
-      ) : (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          {toolbar}
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => setCreatingCatalogItem("category")}>
-              <Plus className="size-4" /> Add category
-            </Button>
-            <Button
-              disabled={!categories.length}
-              onClick={() => setCreatingCatalogItem("subcategory")}
-            >
-              <Plus className="size-4" /> Add sub-category
-            </Button>
-          </div>
-        </div>
-      )}
+      ) : toolbar ? (
+        <div>{toolbar}</div>
+      ) : null}
       <TableCard
-        search={q}
-        onSearch={(v) => {
-          setQ(v);
-          paged.reset();
-        }}
-        placeholder="Search category or sub-category"
+        title="Service Categories Master"
+        description={`${categories.length} categories`}
+        extra={
+          <Button
+            className="bg-primary text-primary-foreground [background-image:none] hover:bg-primary/90"
+            onClick={() => setCreatingCategory(true)}
+          >
+            <Plus className="size-4" /> Add category
+          </Button>
+        }
         footer={paged.footer}
       >
         <Table>
@@ -224,13 +224,25 @@ export function CategoriesPage({
                 <TableCell className="font-semibold">{r.category.name}</TableCell>
                 <TableCell className="text-[13px]">{r.subcategory?.name ?? "—"}</TableCell>
                 <TableCell>
-                  <StatusPill
-                    status={r.active ? "ACTIVE" : "STOPPED"}
-                    label={r.active ? "Active" : "Inactive"}
+                  <MasterStatusSwitch
+                    active={r.active}
+                    name={
+                      r.subcategory ? `${r.category.name} / ${r.subcategory.name}` : r.category.name
+                    }
+                    onChange={(active) => setCatalogRowActive(r, active)}
                   />
                 </TableCell>
                 <TableCell>
                   <div className="flex justify-end">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      title="View category details"
+                      aria-label={`View ${r.category.name}${r.subcategory ? ` / ${r.subcategory.name}` : ""}`}
+                      onClick={() => setViewing(r)}
+                    >
+                      <Eye className="size-4" />
+                    </Button>
                     <Button
                       size="icon"
                       variant="ghost"
@@ -242,6 +254,19 @@ export function CategoriesPage({
                     >
                       <Pencil className="size-4" />
                     </Button>
+                    <MasterDeleteButton
+                      name={
+                        r.subcategory
+                          ? `sub-category "${r.subcategory.name}"`
+                          : `category "${r.category.name}"`
+                      }
+                      description={
+                        r.subcategory
+                          ? "Sub-categories used by services or tickets cannot be deleted. Reassign those records or deactivate this sub-category."
+                          : "Categories used by sub-categories, services, or tickets cannot be deleted. Remove or reassign those records, or deactivate this category."
+                      }
+                      onDelete={() => removeCatalogRow(r)}
+                    />
                   </div>
                 </TableCell>
               </TableRow>
@@ -249,6 +274,40 @@ export function CategoriesPage({
           </TableBody>
         </Table>
       </TableCard>
+      <MasterViewDialog
+        open={viewing !== null}
+        onOpenChange={(open) => !open && setViewing(null)}
+        title={viewing?.subcategory?.name ?? viewing?.category.name ?? "Category details"}
+        description="Service category details"
+        fields={[
+          { label: "Category", value: viewing?.category.name },
+          { label: "Category description", value: viewing?.category.description },
+          { label: "Category status", value: viewing?.category.active ? "Active" : "Inactive" },
+          { label: "Sub-category", value: viewing?.subcategory?.name },
+          { label: "Sub-category description", value: viewing?.subcategory?.description },
+          {
+            label: "Sub-category status",
+            value: viewing?.subcategory
+              ? viewing.subcategory.active
+                ? "Active"
+                : "Inactive"
+              : "—",
+          },
+          {
+            label: "Services",
+            value:
+              services
+                .filter(
+                  (service) =>
+                    service.category_id === viewing?.category.id &&
+                    service.subcategory_id === (viewing?.subcategory?.id ?? null),
+                )
+                .map((service) => service.name)
+                .join(", ") || "—",
+          },
+          { label: "Overall status", value: viewing?.active ? "Active" : "Inactive" },
+        ]}
+      />
       <ServiceDialog
         open={!!serviceEditing}
         service={serviceEditing}
@@ -281,11 +340,11 @@ export function CategoriesPage({
         }}
       />
       <CatalogItemDialog
-        mode={creatingCatalogItem}
+        open={creatingCategory}
         categories={categories}
-        onClose={() => setCreatingCatalogItem(null)}
+        onClose={() => setCreatingCategory(false)}
         onSaved={() => {
-          setCreatingCatalogItem(null);
+          setCreatingCategory(false);
           reload();
         }}
       />
@@ -294,117 +353,119 @@ export function CategoriesPage({
 }
 
 function CatalogItemDialog({
-  mode,
+  open,
   categories,
   onClose,
   onSaved,
 }: {
-  mode: "category" | "subcategory" | null;
+  open: boolean;
   categories: HdCategory[];
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [categoryId, setCategoryId] = useState("");
   const [name, setName] = useState("");
+  const [subcategoryNames, setSubcategoryNames] = useState<string[]>([""]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setCategoryId(categories[0]?.id ?? "");
+    setSubcategoryNames([""]);
     setName("");
-  }, [mode, categories]);
+  }, [open]);
 
   const save = async () => {
     const normalizedName = name.trim();
     if (!normalizedName) {
-      toast.error(`${mode === "category" ? "Category" : "Sub-category"} name is required.`);
-      return;
-    }
-    if (mode === "subcategory" && !categories.some((category) => category.id === categoryId)) {
-      toast.error("Select a category for this sub-category.");
+      toast.error("Category name is required.");
       return;
     }
 
     setSaving(true);
     try {
-      if (mode === "category") {
-        await catalogService.saveCategory({
-          name: normalizedName,
-          description: "",
-          sort_order: categories.length
-            ? Math.max(...categories.map((category) => category.sort_order)) + 1
-            : 1,
-          active: true,
-        });
-        toast.success("Category added");
-      } else if (mode === "subcategory") {
-        await catalogService.saveSubcategory({
-          category_id: categoryId,
-          name: normalizedName,
-          description: "",
-          active: true,
-        });
-        toast.success("Sub-category added");
-      } else {
-        return;
-      }
+      const categoryId = crypto.randomUUID();
+      await catalogService.saveCategory({
+        id: categoryId,
+        name: normalizedName,
+        description: "",
+        sort_order: categories.length
+          ? Math.max(...categories.map((category) => category.sort_order)) + 1
+          : 1,
+        active: true,
+      });
+      const subcategories = subcategoryNames.map((value) => value.trim()).filter(Boolean);
+      await Promise.all(
+        subcategories.map((subcategoryName) =>
+          catalogService.saveSubcategory({
+            category_id: categoryId,
+            name: subcategoryName,
+            description: "",
+            active: true,
+          }),
+        ),
+      );
+      toast.success(
+        subcategories.length
+          ? `Category and ${subcategories.length} sub-categor${subcategories.length === 1 ? "y" : "ies"} added`
+          : "Category added",
+      );
       onSaved();
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : `Unable to add the ${mode === "category" ? "category" : "sub-category"}.`,
-      );
+      toast.error(error instanceof Error ? error.message : "Unable to add the category.");
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <Dialog open={mode !== null} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{mode === "category" ? "Add category" : "Add sub-category"}</DialogTitle>
+          <DialogTitle>Add category</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
-          {mode === "subcategory" ? (
-            <div className="space-y-1.5">
-              <Label>Category</Label>
-              <Select value={categoryId} onValueChange={setCategoryId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {categories.map((category) => (
-                    <SelectItem key={category.id} value={category.id}>
-                      {category.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          ) : null}
           <div className="space-y-1.5">
-            <Label>{mode === "category" ? "Category name" : "Sub-category name"}</Label>
+            <Label>Category name</Label>
             <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
-              placeholder={mode === "category" ? "e.g. HVAC" : "e.g. AC Not Cooling"}
+              placeholder="e.g. HVAC"
               maxLength={120}
             />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Sub-categories (optional)</Label>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setSubcategoryNames((current) => [...current, ""])}
+              >
+                <Plus className="size-4" />
+                Add sub-category
+              </Button>
+            </div>
+            {subcategoryNames.map((subcategoryName, index) => (
+              <Input
+                key={index}
+                value={subcategoryName}
+                onChange={(event) =>
+                  setSubcategoryNames((current) =>
+                    current.map((value, currentIndex) =>
+                      currentIndex === index ? event.target.value : value,
+                    ),
+                  )
+                }
+                placeholder={`Sub-category ${index + 1}`}
+                maxLength={120}
+              />
+            ))}
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={saving} onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            disabled={
-              saving ||
-              !name.trim() ||
-              (mode === "subcategory" && (!categories.length || !categoryId))
-            }
-            onClick={() => void save()}
-          >
+          <Button disabled={saving || !name.trim()} onClick={() => void save()}>
             {saving ? "Saving…" : "Save"}
           </Button>
         </DialogFooter>

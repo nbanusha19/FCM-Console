@@ -1,13 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { MapPin, Pencil, Plus, QrCode, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Eye, MapPin, Pencil, Plus, QrCode, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AppPage } from "@/components/layout/AppPage";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { StatusPill } from "@/components/common/StatusBadge";
+import { usePaged } from "@/components/common/TableCard";
+import { MasterViewDialog } from "@/components/masters/MasterViewDialog";
+import { MasterDeleteButton } from "@/components/masters/MasterDeleteButton";
+import { MasterStatusSwitch } from "@/components/masters/MasterStatusSwitch";
 import {
   Dialog,
   DialogContent,
@@ -30,8 +33,15 @@ import {
 } from "@/services/helpdesk-api";
 import { listBranches } from "@/services/branches";
 import type { Branch } from "@/lib/types";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Link } from "@tanstack/react-router";
-import type { ReactNode } from "react";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -43,7 +53,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/hd-locations")({
-  head: () => ({ meta: [{ title: "Building locations — FCM Helpdesk" }] }),
+  head: () => ({ meta: [{ title: "Building Master — FCM Helpdesk" }] }),
   component: () => (
     <AppPage roles={["ADMIN"]}>
       <LocationsPage />
@@ -53,39 +63,29 @@ export const Route = createFileRoute("/hd-locations")({
 
 export function LocationsPage({
   embedded = false,
-  toolbar,
+  createBuildingOpen = false,
+  onCreateBuildingOpenChange,
 }: {
   embedded?: boolean;
-  toolbar?: ReactNode;
+  createBuildingOpen?: boolean;
+  onCreateBuildingOpenChange?: (open: boolean) => void;
 } = {}) {
   const [buildings, setBuildings] = useState<HdBuilding[]>([]);
-  const [areas, setAreas] = useState<HdBuildingArea[]>([]);
-  const [floors, setFloors] = useState<HdBuildingFloor[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
-  const [selectedId, setSelectedId] = useState("");
   const [buildingEditor, setBuildingEditor] = useState<HdBuilding | "new" | null>(null);
-  const [areaEditor, setAreaEditor] = useState<HdBuildingArea | "new" | null>(null);
-  const [addingFloor, setAddingFloor] = useState(false);
+  const [viewing, setViewing] = useState<HdBuilding | null>(null);
   const [loading, setLoading] = useState(true);
+  const pagedBuildings = usePaged(buildings);
 
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextBuildings, nextAreas, nextFloors, nextBranches] = await Promise.all([
+      const [nextBuildings, nextBranches] = await Promise.all([
         catalogService.listBuildings(),
-        catalogService.listBuildingAreas(),
-        catalogService.listBuildingFloors(),
         listBranches(false),
       ]);
       setBuildings(nextBuildings);
-      setAreas(nextAreas);
-      setFloors(nextFloors);
       setBranches(nextBranches);
-      setSelectedId((current) =>
-        nextBuildings.some((building) => building.id === current)
-          ? current
-          : (nextBuildings[0]?.id ?? ""),
-      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load Helpdesk locations.");
     } finally {
@@ -96,29 +96,25 @@ export function LocationsPage({
     void reload();
   }, [reload]);
 
-  const selected = buildings.find((building) => building.id === selectedId);
-  const selectedAreas = useMemo(
-    () => areas.filter((area) => area.building_id === selectedId),
-    [areas, selectedId],
-  );
-  const selectedBranch = branches.find((branch) => branch.id === selected?.branch_id);
-  const selectedFloors = useMemo(() => {
-    const configured = floors
-      .filter((floor) => floor.building_id === selectedId && floor.active)
-      .map((floor) => floor.name);
-    const legacy = selectedAreas.map((area) => area.floor);
-    return [...new Set([...configured, ...legacy])].sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true }),
-    );
-  }, [floors, selectedAreas, selectedId]);
+  const editorValue = buildingEditor ?? (createBuildingOpen ? "new" : null);
+  const setBuildingActive = async (building: HdBuilding, active: boolean) => {
+    await catalogService.saveBuilding({ ...building, active });
+    await reload();
+    toast.success(`Building ${active ? "activated" : "deactivated"}.`);
+  };
+  const removeBuilding = async (building: HdBuilding) => {
+    await catalogService.deleteBuilding(building.id);
+    await reload();
+    toast.success("Building deleted.");
+  };
 
   return (
     <div className="space-y-6">
       {!embedded ? (
         <PageHeader
           eyebrow="FCM Helpdesk"
-          title="Building locations"
-          subtitle="Configure buildings, their geofence, and the floors and areas shown after scanning the building QR."
+          title="Building Master"
+          subtitle="Configure Helpdesk buildings and their geofence."
           actions={
             <div className="flex gap-2">
               <Button variant="outline" asChild>
@@ -127,184 +123,136 @@ export function LocationsPage({
                   Building QR
                 </Link>
               </Button>
-              <Button onClick={() => setBuildingEditor("new")}>
-                <Plus className="size-4" />
-                Add building
-              </Button>
             </div>
           }
         />
-      ) : (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          {toolbar}
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" asChild>
-              <Link to="/hd-qr">
-                <QrCode className="size-4" />
-                Building QR
-              </Link>
-            </Button>
-            <Button onClick={() => setBuildingEditor("new")}>
-              <Plus className="size-4" />
-              Add building
-            </Button>
+      ) : null}
+      <section className="surface-card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <h2 className="font-display text-[15px] font-bold tracking-tight">Buildings</h2>
+            <p className="text-[12px] text-muted-foreground">
+              {buildings.length} building{buildings.length === 1 ? "" : "s"}
+            </p>
           </div>
+          <Button
+            className="bg-primary text-primary-foreground [background-image:none] hover:bg-primary/90"
+            onClick={() => setBuildingEditor("new")}
+          >
+            <Plus className="size-4" />
+            Add building
+          </Button>
         </div>
-      )}
-      <section className="surface-card space-y-4 p-5">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="min-w-64 flex-1 space-y-1.5">
-            <Label>Building</Label>
-            <Select value={selectedId} onValueChange={setSelectedId} disabled={!buildings.length}>
-              <SelectTrigger>
-                <SelectValue placeholder={loading ? "Loading buildings…" : "Select building"} />
-              </SelectTrigger>
-              <SelectContent>
-                {buildings.map((building) => (
-                  <SelectItem key={building.id} value={building.id}>
-                    {building.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5 sm:col-span-2">
-            <Label>City</Label>
-            <Input
-              value={selectedBranch?.city ?? ""}
-              readOnly
-              placeholder="Set the city on the branch master"
-            />
-          </div>
-          {selected ? (
-            <Button variant="outline" onClick={() => setBuildingEditor(selected)}>
-              <Pencil className="size-4" />
-              Edit building
-            </Button>
-          ) : null}
-        </div>
-        {selected ? (
-          <>
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3">
-              <div>
-                <p className="font-semibold">{selected.name}</p>
-                <p className="text-[12px] text-muted-foreground">
-                  {branches.find((branch) => branch.id === selected.branch_id)?.name ??
-                    "Branch unavailable"}
-                  {selectedBranch?.city ? ` · ${selectedBranch.city}` : ""}
-                  {" · "}Geofence{" "}
-                  {selected.latitude != null && selected.longitude != null
-                    ? `${selected.radius_m} m`
-                    : "not configured"}
-                </p>
-              </div>
-              <StatusPill
-                status={selected.active ? "ACTIVE" : "INACTIVE"}
-                label={selected.active ? "Active" : "Inactive"}
-              />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="font-semibold">Floors and areas</h2>
-                <p className="text-[12px] text-muted-foreground">
-                  Configure floors first, then add the areas belonging to each floor across this
-                  branch office.
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setAddingFloor(true)}>
-                  <Plus className="size-4" />
-                  Add floor
-                </Button>
-                <Button onClick={() => setAreaEditor("new")} disabled={!selectedFloors.length}>
-                  <Plus className="size-4" />
-                  Add area
-                </Button>
-              </div>
-            </div>
-            {selectedFloors.length ? (
-              <div className="flex flex-wrap gap-2">
-                {selectedFloors.map((floor) => (
-                  <span
-                    key={floor}
-                    className="rounded-full border border-border px-3 py-1 text-[12px] font-medium"
-                  >
-                    {floor}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-                Add a floor before configuring its areas.
-              </p>
-            )}
-            {selectedAreas.length ? (
-              <div className="divide-y divide-border rounded-lg border border-border">
-                {selectedAreas.map((area) => (
-                  <div key={area.id} className="flex items-center justify-between gap-3 p-3">
-                    <div>
-                      <p className="font-medium">{area.name}</p>
-                      <p className="text-[12px] text-muted-foreground">{area.floor}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <StatusPill
-                        status={area.active ? "ACTIVE" : "INACTIVE"}
-                        label={area.active ? "Active" : "Inactive"}
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Building</TableHead>
+                <TableHead>Branch</TableHead>
+                <TableHead>City</TableHead>
+                <TableHead>Geofence</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pagedBuildings.rows.map((building) => {
+                const branch = branches.find((item) => item.id === building.branch_id);
+                return (
+                  <TableRow key={building.id}>
+                    <TableCell className="font-semibold">{building.name}</TableCell>
+                    <TableCell>{branch?.name ?? "Branch unavailable"}</TableCell>
+                    <TableCell>{branch?.city || "—"}</TableCell>
+                    <TableCell>
+                      {building.latitude != null && building.longitude != null
+                        ? `${building.radius_m} m`
+                        : "Not configured"}
+                    </TableCell>
+                    <TableCell>
+                      <MasterStatusSwitch
+                        active={building.active}
+                        name={building.name}
+                        onChange={(active) => setBuildingActive(building, active)}
                       />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Edit ${area.name}`}
-                        onClick={() => setAreaEditor(area)}
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-                No areas configured for this building yet.
-              </p>
-            )}
-          </>
-        ) : (
-          <p className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            {loading
-              ? "Loading location masters…"
-              : "Add a building to configure its geofence and areas."}
-          </p>
-        )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex justify-end">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          aria-label={`View ${building.name}`}
+                          title="View building"
+                          onClick={() => setViewing(building)}
+                        >
+                          <Eye className="size-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          aria-label={`Edit ${building.name}`}
+                          title="Edit building"
+                          onClick={() => setBuildingEditor(building)}
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                        <MasterDeleteButton
+                          name={`building "${building.name}"`}
+                          description="Buildings referenced by tickets or feedback, or with configured floors or areas, cannot be deleted. Deactivate the building to preserve its history."
+                          onDelete={() => removeBuilding(building)}
+                        />
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+              {!buildings.length ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
+                    {loading
+                      ? "Loading location masters…"
+                      : "Add a building to configure its geofence."}
+                  </TableCell>
+                </TableRow>
+              ) : null}
+            </TableBody>
+          </Table>
+        </div>
+        {pagedBuildings.footer}
       </section>
+      <MasterViewDialog
+        open={viewing !== null}
+        onOpenChange={(open) => !open && setViewing(null)}
+        title={viewing?.name ?? "Building details"}
+        description="Building details"
+        fields={[
+          {
+            label: "Branch",
+            value: branches.find((branch) => branch.id === viewing?.branch_id)?.name,
+          },
+          {
+            label: "City",
+            value: branches.find((branch) => branch.id === viewing?.branch_id)?.city,
+          },
+          { label: "Latitude", value: viewing?.latitude == null ? "—" : String(viewing.latitude) },
+          {
+            label: "Longitude",
+            value: viewing?.longitude == null ? "—" : String(viewing.longitude),
+          },
+          { label: "Geofence radius", value: viewing ? `${viewing.radius_m} m` : "—" },
+          { label: "Status", value: viewing?.active ? "Active" : "Inactive" },
+        ]}
+      />
       <BuildingDialog
-        open={buildingEditor !== null}
-        value={buildingEditor}
+        open={editorValue !== null}
+        value={editorValue}
         branches={branches}
-        onClose={() => setBuildingEditor(null)}
+        onClose={() => {
+          setBuildingEditor(null);
+          onCreateBuildingOpenChange?.(false);
+        }}
         onSaved={() => {
           setBuildingEditor(null);
-          void reload();
-        }}
-      />
-      <AreaDialog
-        open={areaEditor !== null}
-        value={areaEditor}
-        building={selected ?? null}
-        floors={selectedFloors}
-        onClose={() => setAreaEditor(null)}
-        onSaved={() => {
-          setAreaEditor(null);
-          void reload();
-        }}
-      />
-      <FloorDialog
-        open={addingFloor}
-        building={selected ?? null}
-        floors={floors.filter((floor) => floor.building_id === selectedId)}
-        onClose={() => setAddingFloor(false)}
-        onSaved={() => {
-          setAddingFloor(false);
+          onCreateBuildingOpenChange?.(false);
           void reload();
         }}
       />

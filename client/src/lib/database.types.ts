@@ -541,24 +541,30 @@ export type Database = {
       hd_building_floors: {
         Row: {
           active: boolean;
-          building_id: string;
+          building_id: string | null;
           created_at: string;
+          floor_name?: string;
+          floor_number?: string;
           id: string;
           name: string;
           updated_at: string;
         };
         Insert: {
           active?: boolean;
-          building_id: string;
+          building_id?: string | null;
           created_at?: string;
+          floor_name?: string;
+          floor_number?: string;
           id?: string;
           name: string;
           updated_at?: string;
         };
         Update: {
           active?: boolean;
-          building_id?: string;
+          building_id?: string | null;
           created_at?: string;
+          floor_name?: string;
+          floor_number?: string;
           id?: string;
           name?: string;
           updated_at?: string;

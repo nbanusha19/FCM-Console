@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pencil, Plus, Trash2, Wrench } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Eye, Pencil, Plus, Trash2, Wrench } from "lucide-react";
 import { toast } from "sonner";
 import { AppPage } from "@/components/layout/AppPage";
 import { PageHeader } from "@/components/common/PageHeader";
-import { StatusPill } from "@/components/common/StatusBadge";
+import { MasterViewDialog } from "@/components/masters/MasterViewDialog";
+import { MasterDeleteButton } from "@/components/masters/MasterDeleteButton";
+import { MasterStatusSwitch } from "@/components/masters/MasterStatusSwitch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,9 +37,9 @@ import type { ReactNode } from "react";
 export const Route = createFileRoute("/hd-providers")({
   head: () => ({
     meta: [
-      { title: "Service providers — FCM Helpdesk" },
-      { name: "description", content: "Manage helpdesk service providers and their services." },
-      { property: "og:title", content: "Service providers" },
+      { title: "Service Provider Master — FCM Helpdesk" },
+      { name: "description", content: "Manage Helpdesk service providers and their services." },
+      { property: "og:title", content: "Service Provider Master" },
       { property: "og:description", content: "Manage helpdesk service providers." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -58,57 +60,75 @@ export function ProvidersPage({
   toolbar?: ReactNode;
 } = {}) {
   const [providers, setProviders] = useState<HdProvider[]>([]);
-  const [q, setQ] = useState("");
+  const [services, setServices] = useState<HdService[]>([]);
   const [editing, setEditing] = useState<HdProvider | null>(null);
+  const [viewing, setViewing] = useState<HdProvider | null>(null);
   const [adding, setAdding] = useState(false);
 
-  const reload = useCallback(() => {
-    providerService
-      .listProviders()
-      .then(setProviders)
-      .catch((e) => toast.error(e instanceof Error ? e.message : "Unable to load providers."));
+  const reload = useCallback(async () => {
+    const [providerResult, serviceResult] = await Promise.allSettled([
+      providerService.listProviders(),
+      catalogService.listServices(),
+    ]);
+    if (providerResult.status === "rejected") {
+      toast.error(
+        providerResult.reason instanceof Error
+          ? providerResult.reason.message
+          : "Unable to load providers.",
+      );
+      return;
+    }
+    setProviders(providerResult.value);
+    if (serviceResult.status === "fulfilled") {
+      setServices(serviceResult.value);
+    } else {
+      toast.error(
+        serviceResult.reason instanceof Error
+          ? serviceResult.reason.message
+          : "Unable to load mapped provider services.",
+      );
+    }
   }, []);
-  useEffect(reload, [reload]);
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
-  const rows = useMemo(
-    () =>
-      providers.filter(
-        (p) =>
-          !q.trim() ||
-          [p.name, p.email, p.contact].join(" ").toLowerCase().includes(q.trim().toLowerCase()),
-      ),
-    [providers, q],
-  );
-  const paged = usePaged(rows);
+  const setProviderActive = async (provider: HdProvider, active: boolean) => {
+    await providerService.saveProvider({ ...provider, active });
+    await reload();
+    toast.success(`Provider ${active ? "activated" : "deactivated"}.`);
+  };
+
+  const removeProvider = async (provider: HdProvider) => {
+    await providerService.deleteProvider(provider.id);
+    await reload();
+    toast.success("Provider deleted.");
+  };
+
+  const paged = usePaged(providers);
 
   return (
     <div className="space-y-6">
       {!embedded ? (
         <PageHeader
           eyebrow="FCM Helpdesk"
-          title="Service providers"
+          title="Service Provider Master"
           subtitle="Teams that receive and resolve tickets."
-          actions={
-            <Button onClick={() => setAdding(true)}>
-              <Plus className="size-4" /> Add provider
-            </Button>
-          }
         />
-      ) : (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          {toolbar}
-          <Button onClick={() => setAdding(true)}>
+      ) : toolbar ? (
+        <div>{toolbar}</div>
+      ) : null}
+      <TableCard
+        title="Service Provider Master"
+        description={`${providers.length} providers`}
+        extra={
+          <Button
+            className="bg-primary text-primary-foreground [background-image:none] hover:bg-primary/90"
+            onClick={() => setAdding(true)}
+          >
             <Plus className="size-4" /> Add provider
           </Button>
-        </div>
-      )}
-      <TableCard
-        search={q}
-        onSearch={(v) => {
-          setQ(v);
-          paged.reset();
-        }}
-        placeholder="Search provider"
+        }
         footer={paged.footer}
       >
         <Table>
@@ -134,13 +154,23 @@ export function ProvidersPage({
                 <TableCell className="text-[13px]">{p.contact || "—"}</TableCell>
                 <TableCell className="text-[13px]">{p.email || "—"}</TableCell>
                 <TableCell>
-                  <StatusPill
-                    status={p.active ? "ACTIVE" : "STOPPED"}
-                    label={p.active ? "Active" : "Inactive"}
+                  <MasterStatusSwitch
+                    active={p.active}
+                    name={p.name}
+                    onChange={(active) => setProviderActive(p, active)}
                   />
                 </TableCell>
                 <TableCell>
                   <div className="flex justify-end">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      title="View provider"
+                      aria-label={`View ${p.name}`}
+                      onClick={() => setViewing(p)}
+                    >
+                      <Eye className="size-4" />
+                    </Button>
                     <Button
                       size="icon"
                       variant="ghost"
@@ -150,6 +180,11 @@ export function ProvidersPage({
                     >
                       <Pencil className="size-4" />
                     </Button>
+                    <MasterDeleteButton
+                      name={`provider "${p.name}"`}
+                      description="Providers assigned to tickets or mapped to services cannot be deleted. Deactivate the provider to preserve its history."
+                      onDelete={() => removeProvider(p)}
+                    />
                   </div>
                 </TableCell>
               </TableRow>
@@ -157,6 +192,26 @@ export function ProvidersPage({
           </TableBody>
         </Table>
       </TableCard>
+      <MasterViewDialog
+        open={viewing !== null}
+        onOpenChange={(open) => !open && setViewing(null)}
+        title={viewing?.name ?? "Provider details"}
+        description="Service provider details"
+        fields={[
+          { label: "Provider", value: viewing?.name },
+          { label: "Contact", value: viewing?.contact },
+          { label: "Login email", value: viewing?.email },
+          { label: "Status", value: viewing?.active ? "Active" : "Inactive" },
+          {
+            label: "Mapped services",
+            value:
+              services
+                .filter((service) => service.provider_id === viewing?.id)
+                .map((service) => service.name)
+                .join(", ") || "—",
+          },
+        ]}
+      />
       <ProviderDialog
         open={adding || !!editing}
         provider={editing}

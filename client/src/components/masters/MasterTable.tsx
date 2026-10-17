@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from "react";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Eye, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { Pill } from "@/components/common/StatusBadge";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Database } from "lucide-react";
+import { usePaged } from "@/components/common/TableCard";
+import { MasterStatusSwitch } from "@/components/masters/MasterStatusSwitch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,9 +32,13 @@ export function MasterTable<T extends { id: string; status?: string }>({
   columns,
   searchOf,
   onAdd,
+  onView,
   onEdit,
   onDelete,
+  onStatusChange,
+  statusName,
   addLabel = "Add new",
+  addButtonClassName,
   compact = false,
 }: {
   title: string;
@@ -41,9 +47,13 @@ export function MasterTable<T extends { id: string; status?: string }>({
   columns: Column<T>[];
   searchOf: (row: T) => string;
   onAdd?: () => void;
+  onView?: (row: T) => void;
   onEdit?: (row: T) => void;
   onDelete?: (row: T) => void;
+  onStatusChange?: (row: T, active: boolean) => Promise<void>;
+  statusName?: (row: T) => string;
   addLabel?: string;
+  addButtonClassName?: string;
   compact?: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -51,20 +61,49 @@ export function MasterTable<T extends { id: string; status?: string }>({
 
   const q = query.trim().toLowerCase();
   const filtered = q ? rows.filter((r) => searchOf(r).toLowerCase().includes(q)) : rows;
+  const paged = usePaged(filtered);
 
   return (
     <section className="surface-card overflow-hidden">
-      <div className={`flex flex-wrap items-center border-b border-border ${compact ? "gap-2 px-3 py-2" : "gap-3 px-5 py-4"}`}>
+      <div
+        className={`flex flex-wrap items-center border-b border-border ${compact ? "gap-2 px-3 py-2" : "gap-3 px-5 py-4"}`}
+      >
         <div className="min-w-0 flex-1">
-          <h2 className={`font-display font-bold tracking-tight ${compact ? "text-[11px]" : "text-[15px]"}`}>{title}</h2>
-          {description ? <p className={compact ? "text-[9px] text-muted-foreground" : "text-[12px] text-muted-foreground"}>{description}</p> : null}
+          <h2
+            className={`font-display font-bold tracking-tight ${compact ? "text-[11px]" : "text-[15px]"}`}
+          >
+            {title}
+          </h2>
+          {description ? (
+            <p
+              className={
+                compact ? "text-[9px] text-muted-foreground" : "text-[12px] text-muted-foreground"
+              }
+            >
+              {description}
+            </p>
+          ) : null}
         </div>
         <div className={`relative ${compact ? "w-32" : "w-full sm:w-56"}`}>
-          <Search className={`pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground ${compact ? "left-2.5 size-3" : "left-3 size-4"}`} />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search" className={compact ? "h-7 pl-7 text-[10px]" : "pl-9"} />
+          <Search
+            className={`pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground ${compact ? "left-2.5 size-3" : "left-3 size-4"}`}
+          />
+          <Input
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              paged.reset();
+            }}
+            placeholder="Search"
+            className={compact ? "h-7 pl-7 text-[10px]" : "pl-9"}
+          />
         </div>
         {onAdd ? (
-          <Button size={compact ? "sm" : "default"} className={compact ? "h-7 px-2 text-[9px]" : undefined} onClick={onAdd}>
+          <Button
+            size={compact ? "sm" : "default"}
+            className={`${compact ? "h-7 px-2 text-[9px]" : ""} ${addButtonClassName ?? ""}`}
+            onClick={onAdd}
+          >
             <Plus className={compact ? "size-3" : "size-4"} /> {addLabel}
           </Button>
         ) : null}
@@ -74,42 +113,97 @@ export function MasterTable<T extends { id: string; status?: string }>({
         <EmptyState icon={Database} title="No records" description="Add a record to get started." />
       ) : (
         <div className="overflow-x-auto">
-          <table className={`w-full min-w-160 text-left ${compact ? "text-[10px]" : "text-[13px]"}`}>
+          <table
+            className={`w-full min-w-160 text-left ${compact ? "text-[10px]" : "text-[13px]"}`}
+          >
             <thead>
-              <tr className={`border-b border-border bg-muted/40 uppercase tracking-[0.08em] text-muted-foreground ${compact ? "text-[8px]" : "text-[11px]"}`}>
+              <tr
+                className={`border-b border-border bg-muted/40 uppercase tracking-[0.08em] text-muted-foreground ${compact ? "text-[8px]" : "text-[11px]"}`}
+              >
                 {columns.map((c) => (
-                  <th key={c.key} className={`font-semibold ${compact ? "px-3 py-1.5" : "px-5 py-2.5"}`}>
+                  <th
+                    key={c.key}
+                    className={`font-semibold ${compact ? "px-3 py-1.5" : "px-5 py-2.5"}`}
+                  >
                     {c.label}
                   </th>
                 ))}
-                <th className={`font-semibold ${compact ? "px-3 py-1.5" : "px-5 py-2.5"}`}>Status</th>
-                {onEdit || onDelete ? <th className={`text-right font-semibold ${compact ? "px-3 py-1.5" : "px-5 py-2.5"}`}>Actions</th> : null}
+                <th className={`font-semibold ${compact ? "px-3 py-1.5" : "px-5 py-2.5"}`}>
+                  Status
+                </th>
+                {onView || onEdit || onDelete ? (
+                  <th
+                    className={`text-right font-semibold ${compact ? "px-3 py-1.5" : "px-5 py-2.5"}`}
+                  >
+                    Actions
+                  </th>
+                ) : null}
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {filtered.map((row) => (
+              {paged.rows.map((row) => (
                 <tr key={row.id} className="hover:bg-muted/30">
                   {columns.map((c) => (
-                    <td key={c.key} className={`${compact ? "px-3 py-2" : "px-5 py-3"} ${c.mono ? "font-mono text-[12px]" : ""}`}>
+                    <td
+                      key={c.key}
+                      className={`${compact ? "px-3 py-2" : "px-5 py-3"} ${c.mono ? "font-mono text-[12px]" : ""}`}
+                    >
                       {c.render(row)}
                     </td>
                   ))}
                   <td className={compact ? "px-3 py-2" : "px-5 py-3"}>
-                    <Pill className={compact ? "px-1.5 py-0.5 text-[8px]" : undefined} tone={row.status === "INACTIVE" ? "neutral" : "success"}>
-                      {row.status === "INACTIVE" ? "Inactive" : "Active"}
-                    </Pill>
+                    {onStatusChange ? (
+                      <MasterStatusSwitch
+                        active={row.status !== "INACTIVE"}
+                        name={statusName?.(row) ?? row.id}
+                        onChange={(active) => onStatusChange(row, active)}
+                      />
+                    ) : (
+                      <Pill
+                        className={compact ? "px-1.5 py-0.5 text-[8px]" : ""}
+                        tone={row.status === "INACTIVE" ? "neutral" : "success"}
+                      >
+                        {row.status === "INACTIVE" ? "Inactive" : "Active"}
+                      </Pill>
+                    )}
                   </td>
-                  {onEdit || onDelete ? (
+                  {onView || onEdit || onDelete ? (
                     <td className={compact ? "px-3 py-2" : "px-5 py-3"}>
                       <div className="flex justify-end gap-1.5">
+                        {onView ? (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className={compact ? "size-6" : undefined}
+                            onClick={() => onView(row)}
+                            aria-label="View"
+                            title="View"
+                          >
+                            <Eye className={compact ? "size-3" : "size-4"} />
+                          </Button>
+                        ) : null}
                         {onEdit ? (
-                          <Button size="icon" variant="ghost" className={compact ? "size-6" : undefined} onClick={() => onEdit(row)} aria-label="Edit">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className={compact ? "size-6" : undefined}
+                            onClick={() => onEdit(row)}
+                            aria-label="Edit"
+                          >
                             <Pencil className={compact ? "size-3" : "size-4"} />
                           </Button>
                         ) : null}
                         {onDelete ? (
-                          <Button size="icon" variant="ghost" className={compact ? "size-6" : undefined} onClick={() => setPending(row)} aria-label="Delete">
-                            <Trash2 className={compact ? "size-3 text-danger" : "size-4 text-danger"} />
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className={compact ? "size-6" : undefined}
+                            onClick={() => setPending(row)}
+                            aria-label="Delete"
+                          >
+                            <Trash2
+                              className={compact ? "size-3 text-danger" : "size-4 text-danger"}
+                            />
                           </Button>
                         ) : null}
                       </div>
@@ -121,6 +215,7 @@ export function MasterTable<T extends { id: string; status?: string }>({
           </table>
         </div>
       )}
+      {paged.footer}
 
       <AlertDialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}>
         <AlertDialogContent>

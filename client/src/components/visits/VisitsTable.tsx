@@ -28,6 +28,7 @@ import { formatDate, formatTime, initials } from "@/lib/format";
 import { STATUS_LABEL, employeeName, userName, visitorOrigin } from "@/services/vms";
 import { visitorTypeLabel } from "@/constants/visitor-types";
 import { useVms } from "@/hooks/use-vms";
+import { PageSizeSelect } from "@/components/common/PageSizeSelect";
 
 export interface VisitsTableProps {
   visits: Visit[];
@@ -47,7 +48,7 @@ export function VisitsTable({
   visits,
   mode = "visitors",
   showFilters = true,
-  pageSize = 8,
+  pageSize: initialPageSize = 10,
   onApprove,
   onReject,
   onCancel,
@@ -65,6 +66,7 @@ export function VisitsTable({
   const [date, setDate] = useState("");
   const [sortDesc, setSortDesc] = useState(true);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(initialPageSize);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -358,7 +360,15 @@ export function VisitsTable({
               Showing {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, filtered.length)} of{" "}
               {filtered.length}
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <PageSizeSelect
+                value={pageSize}
+                onChange={(size) => {
+                  setPageSize(size);
+                  setPage(1);
+                }}
+              />
+              <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" disabled={current <= 1} onClick={() => setPage(current - 1)}>
                 Previous
               </Button>
@@ -368,6 +378,7 @@ export function VisitsTable({
               <Button variant="outline" size="sm" disabled={current >= pages} onClick={() => setPage(current + 1)}>
                 Next
               </Button>
+              </div>
             </div>
           </div>
         </>

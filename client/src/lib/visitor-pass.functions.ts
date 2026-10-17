@@ -19,6 +19,8 @@ export interface PublicVisitorPass {
   expected_departure: string;
   host_name: string;
   status: string;
+  check_in_available: boolean;
+  check_in_window_message: string;
   checked_in_at: string | null;
   checked_out_at: string | null;
 }

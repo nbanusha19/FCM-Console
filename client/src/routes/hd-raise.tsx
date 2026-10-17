@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusPill } from "@/components/common/StatusBadge";
+import { PublicBuildingHelpdesk } from "@/components/helpdesk/PublicBuildingHelpdesk";
 import {
   Select,
   SelectContent,
@@ -24,6 +25,7 @@ import {
   type HdBuildingArea,
   type HdBuildingFloor,
   type HdCategory,
+  type HdFeedbackTicketOption,
   type HdService,
   type HdSubcategory,
   type HdTicket,
@@ -32,6 +34,7 @@ import {
 export const Route = createFileRoute("/hd-raise")({
   validateSearch: (s: Record<string, unknown>) => ({
     building: typeof s["building"] === "string" ? s["building"] : "",
+    ticket: typeof s["ticket"] === "string" ? s["ticket"] : "",
   }),
   head: () => ({
     meta: [
@@ -49,29 +52,40 @@ export const Route = createFileRoute("/hd-raise")({
       { name: "twitter:card", content: "summary" },
     ],
   }),
-  component: () => (
+  component: RaiseRoute,
+});
+
+function RaiseRoute() {
+  const { building, ticket } = Route.useSearch();
+  if (building) return <PublicBuildingHelpdesk buildingId={building} ticketId={ticket} />;
+  return (
     <AppPage roles={["ADMIN", "BRANCH_MANAGER", "EMPLOYEE"]}>
       <RaisePage />
     </AppPage>
-  ),
-});
+  );
+}
 
 function RaisePage() {
   const { user } = useApp();
   const navigate = useNavigate();
   const { building: qrBuilding } = Route.useSearch();
-  const buildingId = qrBuilding;
+  const [selectedBuildingId, setSelectedBuildingId] = useState(qrBuilding);
+  const buildingId = qrBuilding || selectedBuildingId;
   const [categories, setCategories] = useState<HdCategory[]>([]);
   const [subcategories, setSubcategories] = useState<HdSubcategory[]>([]);
   const [services, setServices] = useState<HdService[]>([]);
   const [buildings, setBuildings] = useState<HdBuilding[]>([]);
+  const [buildingsLoading, setBuildingsLoading] = useState(true);
   const [floors, setFloors] = useState<HdBuildingFloor[]>([]);
   const [areas, setAreas] = useState<HdBuildingArea[]>([]);
-  const [mode, setMode] = useState<"ticket" | "feedback">("ticket");
+  const [mode, setMode] = useState<"ticket" | "feedback" | null>(null);
   const [floorName, setFloorName] = useState("");
   const [areaId, setAreaId] = useState("");
   const [feedback, setFeedback] = useState("");
   const [feedbackRating, setFeedbackRating] = useState(0);
+  const [feedbackTicketId, setFeedbackTicketId] = useState("");
+  const [feedbackTickets, setFeedbackTickets] = useState<HdFeedbackTicketOption[]>([]);
+  const [feedbackTicketNo, setFeedbackTicketNo] = useState("");
   const [feedbackSent, setFeedbackSent] = useState(false);
   const [categoryId, setCategoryId] = useState("");
   const [subcategoryId, setSubcategoryId] = useState("");
@@ -93,11 +107,12 @@ function RaisePage() {
         setCategories(c.filter((x) => x.active));
         setSubcategories(sc.filter((x) => x.active));
         setServices(sv.filter((x) => x.active));
-        setBuildings(b.filter((x) => x.active));
+        setBuildings(b.filter((x) => x.active && x.latitude != null && x.longitude != null));
       })
       .catch((e) =>
         toast.error(e instanceof Error ? e.message : "Unable to load the service catalog."),
-      );
+      )
+      .finally(() => setBuildingsLoading(false));
   }, []);
 
   useEffect(() => {
@@ -119,7 +134,7 @@ function RaisePage() {
       catalogService.listBuildingAreas(buildingId),
     ])
       .then(([floorRows, areaRows]) => {
-        setFloors(floorRows.filter((floor) => floor.active));
+        setFloors(floorRows);
         setAreas(areaRows.filter((area) => area.active));
       })
       .catch((error) =>
@@ -130,17 +145,29 @@ function RaisePage() {
   }, [buildingId, buildings, user?.branchId, user?.role]);
 
   const building = buildings.find((item) => item.id === buildingId);
+  const selectableBuildings = buildings.filter(
+    (item) => user?.role === "ADMIN" || (!!user?.branchId && item.branch_id === user.branchId),
+  );
   const canAccessBuilding =
     user?.role === "ADMIN" || (!!user?.branchId && building?.branch_id === user.branchId);
   const buildingArea = areas.find((area) => area.id === areaId);
   const floorOptions = useMemo(() => {
-    if (floors.length) return floors.map((floor) => floor.name);
+    if (floors.length) return floors.filter((floor) => floor.active).map((floor) => floor.name);
     return [...new Set(areas.map((area) => area.floor))].sort((a, b) => a.localeCompare(b));
   }, [areas, floors]);
   const floorAreas = useMemo(
     () => areas.filter((area) => area.floor === floorName),
     [areas, floorName],
   );
+  useEffect(() => {
+    if (mode !== "feedback" || !user || !buildingId) return;
+    feedbackService
+      .ticketOptions(buildingId)
+      .then(setFeedbackTickets)
+      .catch((error) =>
+        toast.error(error instanceof Error ? error.message : "Unable to load Helpdesk tickets."),
+      );
+  }, [buildingId, mode, user]);
   useEffect(() => {
     if (!categories.length) return;
     if (!categories.some((category) => category.id === categoryId)) setCategoryId("");
@@ -224,9 +251,8 @@ function RaisePage() {
     }
   };
   const submitFeedback = async () => {
-    if (!user || !buildingId) return;
-    if (!building || !floorName || !buildingArea) {
-      toast.error("Select a floor and an area.");
+    if (!user || !feedbackTicketId) {
+      toast.error("Select a ticket to give feedback.");
       return;
     }
     if (feedback.trim().length < 3) {
@@ -239,16 +265,15 @@ function RaisePage() {
     }
     setSubmitting(true);
     try {
-      const position = await getDeviceLocation();
-      await feedbackService.submit({
-        buildingId,
-        areaId,
+      await feedbackService.submitTicket(feedbackTicketId, {
         feedback: feedback.trim(),
         rating: feedbackRating,
-        ...position,
       });
+      setFeedbackTicketNo(
+        feedbackTickets.find((ticket) => ticket.id === feedbackTicketId)?.ticket_no ?? "",
+      );
       setFeedbackSent(true);
-      toast.success("Feedback submitted.");
+      toast.success("Ticket feedback submitted.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to submit feedback.");
     } finally {
@@ -263,18 +288,6 @@ function RaisePage() {
         <p className="text-sm text-muted-foreground">
           Only employees, admins, and branch managers can submit feedback or tickets from building
           QR codes.
-        </p>
-      </div>
-    );
-  }
-
-  if (!buildingId) {
-    return (
-      <div className="mx-auto max-w-lg space-y-3 py-12 text-center">
-        <h1 className="font-display text-xl font-bold">Scan your building QR code</h1>
-        <p className="text-sm text-muted-foreground">
-          Helpdesk tickets and feedback can only be submitted from the QR code displayed at your
-          building.
         </p>
       </div>
     );
@@ -297,14 +310,17 @@ function RaisePage() {
         <CheckCircle2 className="mx-auto size-14 text-success" />
         <h1 className="font-display text-[26px] font-extrabold">Thank you for your feedback</h1>
         <p className="text-sm text-muted-foreground">
-          {building?.name ?? "Your building"} feedback has been recorded.
+          {feedbackTicketNo
+            ? `Feedback for ${feedbackTicketNo} has been recorded.`
+            : "Your ticket feedback has been recorded."}
         </p>
         <Button
           variant="outline"
           onClick={() => {
             setFeedbackSent(false);
             setFeedback("");
-            setAreaId("");
+            setFeedbackTicketId("");
+            setFeedbackRating(0);
           }}
         >
           Submit more feedback
@@ -361,34 +377,96 @@ function RaisePage() {
     <div className="mx-auto max-w-2xl space-y-6">
       <PageHeader
         eyebrow="FCM Helpdesk"
-        title={building?.name ?? "Building Helpdesk"}
-        subtitle="Choose a floor and area, then give feedback or raise a service ticket. Submissions are checked against this building's geofence."
+        title={building?.name ?? "Raise a request"}
+        subtitle="Choose whether to raise a ticket or give feedback. Submissions are checked against the selected building's geofence."
       />
       <div className="surface-card space-y-5 p-6">
-        <>
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              variant={mode === "ticket" ? "default" : "outline"}
-              onClick={() => setMode("ticket")}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <button
+            type="button"
+            aria-pressed={mode === "ticket"}
+            onClick={() => setMode("ticket")}
+            className={`rounded-xl border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+              mode === "ticket"
+                ? "border-primary bg-primary/5"
+                : "border-border bg-background hover:border-primary/50"
+            }`}
+          >
+            <span className="mb-3 grid size-10 place-items-center rounded-lg bg-primary-soft text-primary">
+              <Send className="size-5" />
+            </span>
+            <span className="block font-display text-[16px] font-bold">Raise a ticket</span>
+            <span className="mt-1 block text-[13px] text-muted-foreground">
+              Report a facility issue or request a service.
+            </span>
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "feedback"}
+            onClick={() => setMode("feedback")}
+            className={`rounded-xl border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+              mode === "feedback"
+                ? "border-primary bg-primary/5"
+                : "border-border bg-background hover:border-primary/50"
+            }`}
+          >
+            <span className="mb-3 grid size-10 place-items-center rounded-lg bg-primary-soft text-primary">
+              <MessageSquareText className="size-5" />
+            </span>
+            <span className="block font-display text-[16px] font-bold">Give feedback</span>
+            <span className="mt-1 block text-[13px] text-muted-foreground">
+              Rate your experience and share feedback.
+            </span>
+          </button>
+        </div>
+        {!qrBuilding ? (
+          <div className="space-y-1.5">
+            <Label>Building</Label>
+            <Select
+              value={selectedBuildingId}
+              onValueChange={(value) => {
+                setSelectedBuildingId(value);
+                setFloorName("");
+                setAreaId("");
+                setFeedbackTicketId("");
+              }}
             >
-              <Send className="size-4" />
-              Raise a ticket
-            </Button>
-            <Button
-              variant={mode === "feedback" ? "default" : "outline"}
-              onClick={() => setMode("feedback")}
-            >
-              <MessageSquareText className="size-4" />
-              Give feedback
-            </Button>
+              <SelectTrigger>
+                <SelectValue placeholder="Select your building" />
+              </SelectTrigger>
+              <SelectContent>
+                {selectableBuildings.map((item) => (
+                  <SelectItem key={item.id} value={item.id}>
+                    {item.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {buildingsLoading ? (
+              <p className="text-[12px] text-muted-foreground">Loading available buildings…</p>
+            ) : !selectableBuildings.length ? (
+              <p className="text-[12px] text-warning">
+                {user?.role === "ADMIN"
+                  ? "No active geofenced buildings are configured."
+                  : "No active geofenced buildings are configured for your branch."}
+              </p>
+            ) : null}
           </div>
-          {!building ? (
-            <p className="text-sm text-danger">
-              This building QR is not active or has not been configured. Contact the Helpdesk
-              administrator.
-            </p>
-          ) : null}
-          {building ? (
+        ) : null}
+        {buildingId && !building ? (
+          <p className="text-sm text-danger">
+            This building QR is not active or has not been configured. Contact the Helpdesk
+            administrator.
+          </p>
+        ) : null}
+        {mode && !building ? (
+          <p className="text-sm text-muted-foreground">
+            Select an active building to continue with your{" "}
+            {mode === "ticket" ? "ticket" : "feedback"} request.
+          </p>
+        ) : null}
+        <>
+          {building && mode === "ticket" ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>Floor</Label>
@@ -441,8 +519,41 @@ function RaisePage() {
             </div>
           ) : null}
         </>
-        {buildingId && mode === "feedback" ? (
+        {buildingId && building && mode === "feedback" ? (
           <>
+            <div className="space-y-1.5">
+              <Label>Ticket</Label>
+              <Select value={feedbackTicketId} onValueChange={setFeedbackTicketId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a ticket" />
+                </SelectTrigger>
+                <SelectContent
+                  className="max-h-[70vh]"
+                  viewportClassName="h-auto"
+                >
+                  {feedbackTickets.map((ticket) => (
+                    <SelectItem
+                      key={ticket.id}
+                      value={ticket.id}
+                      disabled={ticket.feedback_submitted}
+                    >
+                      <span className="min-w-0 whitespace-normal">
+                        <span className="font-medium">
+                          {ticket.ticket_no} · {ticket.category_name} · {ticket.status}
+                          {ticket.feedback_submitted ? " · Feedback submitted" : ""}
+                        </span>
+                        <span className="line-clamp-2 text-xs text-muted-foreground">
+                          {ticket.description}
+                        </span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {!feedbackTickets.length ? (
+                <p className="text-[12px] text-muted-foreground">No Helpdesk tickets were found.</p>
+              ) : null}
+            </div>
             <div className="space-y-1.5">
               <div className="space-y-1.5">
                 <Label>Rating</Label>
@@ -472,13 +583,13 @@ function RaisePage() {
                 rows={5}
                 value={feedback}
                 onChange={(event) => setFeedback(event.target.value)}
-                placeholder="Share your feedback about this building or area."
+                placeholder="Tell us about your experience with this ticket."
               />
             </div>
             <Button
               className="w-full"
               size="lg"
-              disabled={submitting || !building || !floorName || !areaId || feedbackRating === 0}
+              disabled={submitting || !feedbackTicketId || feedbackRating === 0}
               onClick={() => void submitFeedback()}
             >
               {submitting ? (
@@ -495,7 +606,7 @@ function RaisePage() {
             </Button>
           </>
         ) : null}
-        {mode === "ticket" ? (
+        {buildingId && building && mode === "ticket" ? (
           <>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">

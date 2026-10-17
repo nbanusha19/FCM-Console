@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from database import cursor, rows_as_dicts
+from email_templates import branded_email_html, plain_text_to_html
 from security import current_user
 
 logger = logging.getLogger("vms-api")
@@ -450,15 +451,20 @@ def _send_approval_email(permit: dict[str, Any], recipient: str) -> None:
     )
     safe = lambda value: html.escape(value, quote=True)
     message.add_alternative(
-        "<p>Your E-Work Permit has been approved.</p>"
-        f"<p><strong>Permit:</strong> {safe(permit_no)}<br>"
-        f"<strong>Work:</strong> {safe(work)}<br>"
-        f"<strong>Location:</strong> {safe(location)}<br>"
-        f"<strong>Date:</strong> {safe(work_date)}<br>"
-        f"<strong>Approved window:</strong> {safe(time_window)}<br>"
-        f"<strong>Workers expected:</strong> {safe(worker_count)}</p>"
-        "<p>Present this QR code to Security for gate verification. Entry is limited to the approved date and time.</p>"
-        '<p><img src="cid:ewp-qr" alt="E-Work Permit QR code" width="220" height="220"></p>',
+        branded_email_html(
+            "E-Work Permit",
+            f"Permit {permit_no} approved",
+            "<p>Your E-Work Permit has been approved.</p>"
+            f"<p><strong>Permit:</strong> {safe(permit_no)}<br>"
+            f"<strong>Work:</strong> {safe(work)}<br>"
+            f"<strong>Location:</strong> {safe(location)}<br>"
+            f"<strong>Date:</strong> {safe(work_date)}<br>"
+            f"<strong>Approved window:</strong> {safe(time_window)}<br>"
+            f"<strong>Workers expected:</strong> {safe(worker_count)}</p>"
+            "<p>Present this QR code to Security for gate verification. Entry is limited to the approved date and time.</p>"
+            '<p><img src="cid:ewp-qr" alt="E-Work Permit QR code" width="220" height="220"></p>',
+            preheader=f"Permit {permit_no} is approved. See the attached precaution pack.",
+        ),
         subtype="html",
     )
     message.get_payload()[-1].add_related(qr_png, maintype="image", subtype="png", cid="<ewp-qr>")
@@ -523,15 +529,31 @@ def _send_contractor_otp_email(
         "The code expires in 10 minutes and can be used only once. "
         f"If you did not request this code, you can ignore this email.{verification_instruction}"
     )
-    if verification_url:
-        message.add_alternative(
+    message.add_alternative(
+        branded_email_html(
+            "E-Work Permit",
+            "Contractor verification code",
             f"<p>Your E-Work Permit {html.escape(purpose)} code for "
-            f"{html.escape(permit_no)} is <strong>{html.escape(code)}</strong>.</p>"
-            "<p>Open this secure link on your phone to enter the code yourself:</p>"
-            f'<p><a href="{html.escape(verification_url, quote=True)}">Verify contractor check-in</a></p>'
-            "<p>The code expires in 10 minutes and can be used only once.</p>",
-            subtype="html",
-        )
+            f"{html.escape(permit_no)} is:</p>"
+            f'<div style="margin:20px 0;padding:18px;text-align:center;background-color:#f3f6fb;'
+            'border:1px solid #dce3ed;border-radius:8px">'
+            '<span style="font-size:28px;font-weight:bold;letter-spacing:8px;color:#155eef">'
+            f"{html.escape(code)}</span></div>"
+            + (
+                "<p>Open this secure link on your phone to enter the code yourself:</p>"
+                f'<p><a href="{html.escape(verification_url, quote=True)}" '
+                'style="display:inline-block;padding:12px 20px;background-color:#155eef;'
+                'color:#ffffff;text-decoration:none;font-weight:bold;border-radius:6px">'
+                "Verify contractor check-in</a></p>"
+                if verification_url
+                else ""
+            )
+            + "<p>The code expires in 10 minutes and can be used only once. "
+            "If you did not request it, you can ignore this email.</p>",
+            preheader=f"Your E-Work Permit {purpose} code for {permit_no}.",
+        ),
+        subtype="html",
+    )
     try:
         if settings.smtp_use_ssl:
             smtp = smtplib.SMTP_SSL(
@@ -652,6 +674,15 @@ def _send_ewp_notification_email(recipient: str, subject: str, body: str) -> Non
     message["From"] = settings.smtp_from_email
     message["To"] = recipient
     message.set_content(body)
+    message.add_alternative(
+        branded_email_html(
+            "E-Work Permit",
+            subject,
+            plain_text_to_html(body),
+            preheader=subject,
+        ),
+        subtype="html",
+    )
     if settings.smtp_use_ssl:
         smtp = smtplib.SMTP_SSL(
             settings.smtp_host,

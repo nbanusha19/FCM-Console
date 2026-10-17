@@ -161,3 +161,11 @@ Before deploying the internal cross-branch visitor selector, run
 additive migration stores the selected employee and source branch on each visit;
 existing visit rows remain unchanged. The API validates the selected active
 employee and rejects internal visits to that employee's own branch.
+
+### Guest Helpdesk QR tickets
+
+Before deploying QR ticket creation for visitors without an application account,
+run `migrations/20261016_allow_guest_helpdesk_tickets.sql` against VMS1. It makes
+`HelpdeskTickets.RaisedByUserId` nullable so OTP-verified guest tickets can retain
+their verified email and display name without an `AppUsers` record. Existing
+ticket user IDs and authenticated ticket creation are unchanged.

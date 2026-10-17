@@ -3,7 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AppPage } from "@/components/layout/AppPage";
 import { MasterTable } from "@/components/masters/MasterTable";
-import { BranchGeofenceMap } from "@/components/masters/BranchGeofenceMap";
+import { BranchMaster } from "@/components/masters/BranchMaster";
 import { Pill } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,20 +20,13 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ROLE_LABEL } from "@/constants/nav";
-import { Crosshair, Eye, EyeOff, MapPin } from "lucide-react";
+import { Eye, EyeOff } from "lucide-react";
 import { useApp } from "@/context/app-context";
 import { useVms } from "@/hooks/use-vms";
 import { ApiError } from "@/lib/api";
 import type { AppUser, Branch, RoleKey, RoleMaster, Status } from "@/lib/types";
+import { listBranches } from "@/services/branches";
 import { KEYS, saveData } from "@/services/storage";
-import {
-  createBranch,
-  deleteBranch,
-  getBranchGeofence,
-  listBranches,
-  saveBranchGeofence,
-  updateBranch,
-} from "@/services/branches";
 import { listRoles, updateRole } from "@/services/roles";
 import { createUser, deleteUser, listUsers, updateUser } from "@/services/users";
 import { branchName } from "@/services/vms";
@@ -66,7 +59,7 @@ export const Route = createFileRoute("/masters")({
   ),
 });
 
-type Entity = "branch" | "user" | "role";
+type Entity = "user" | "role";
 
 const STATUS_OPTIONS: Status[] = ["ACTIVE", "INACTIVE"];
 const ROLE_OPTIONS: RoleKey[] = [
@@ -121,51 +114,7 @@ function MastersPage() {
     if (!user) return;
     setSaving(true);
     try {
-      if (entity === "branch") {
-        const latitude = rowStr(row, "latitude").trim();
-        const longitude = rowStr(row, "longitude").trim();
-        if (Boolean(latitude) !== Boolean(longitude)) {
-          throw new ApiError("Enter both geofence latitude and longitude.", 400);
-        }
-        if (latitude && longitude) {
-          const latitudeValue = Number(latitude);
-          const longitudeValue = Number(longitude);
-          const radiusValue = Number(rowStr(row, "radiusM") || "100");
-          if (
-            !Number.isFinite(latitudeValue) ||
-            latitudeValue < -90 ||
-            latitudeValue > 90 ||
-            !Number.isFinite(longitudeValue) ||
-            longitudeValue < -180 ||
-            longitudeValue > 180 ||
-            !Number.isInteger(radiusValue) ||
-            radiusValue < 25 ||
-            radiusValue > 5000
-          ) {
-            throw new ApiError("Enter valid coordinates and a geofence radius from 25 to 5000 metres.", 400);
-          }
-        }
-        const payload = {
-          name: rowStr(row, "name"),
-          location: rowStr(row, "address"),
-          phone: rowStr(row, "phone"),
-          email: rowStr(row, "email"),
-          status: rowVal<Status>(row, "status") || "ACTIVE",
-        };
-        const id = rowStr(row, "id");
-        const branch = id
-          ? await updateBranch(id, payload)
-          : await createBranch(payload);
-        if (latitude && longitude) {
-          await saveBranchGeofence(branch.id, {
-            latitude: Number(latitude),
-            longitude: Number(longitude),
-            radiusM: Number(rowStr(row, "radiusM") || "100"),
-          });
-        }
-        await loadApiMasters();
-        toast.success("Branch saved");
-      } else if (entity === "user") {
+      if (entity === "user") {
         const password = rowStr(row, "password");
         const payload = {
           name: rowStr(row, "name"),
@@ -201,38 +150,9 @@ function MastersPage() {
     }
   };
 
-  const editBranch = async (row: Branch) => {
-    const editRow: Record<string, unknown> = { ...row, latitude: "", longitude: "", radiusM: "100" };
-    setEditing({ entity: "branch", row: editRow });
-    try {
-      const geofence = await getBranchGeofence(row.id);
-      setEditing((current) =>
-        current?.entity === "branch" && rowStr(current.row, "id") === row.id
-          ? {
-              ...current,
-              row: {
-                ...current.row,
-                latitude: geofence.latitude == null ? "" : String(geofence.latitude),
-                longitude: geofence.longitude == null ? "" : String(geofence.longitude),
-                radiusM: String(geofence.radiusM),
-              },
-            }
-          : current,
-      );
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not load branch geofence settings.");
-    }
-  };
-
   const remove = async (entity: Entity, id: string) => {
     if (!user) return;
     try {
-      if (entity === "branch") {
-        await deleteBranch(id);
-        await loadApiMasters();
-        toast.success("Branch deleted");
-        return;
-      }
       if (entity === "user") {
         if (id === user.id) {
           toast.error("You cannot delete the account you are signed in with");
@@ -268,39 +188,8 @@ function MastersPage() {
           <TabsTrigger value="reference" className="h-7 rounded-md border border-transparent px-2 text-[10px] data-[state=active]:border-border data-[state=active]:bg-white data-[state=active]:text-primary data-[state=active]:shadow-none">Reference</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="branches" className="mt-2">
-          <MasterTable<Branch>
-            title="Branches"
-            description={`${branches.length} locations`}
-            rows={branches}
-            searchOf={(b) => `${b.name} ${b.address} ${b.phone} ${b.email}`}
-            columns={[
-              { key: "name", label: "Branch", render: (b) => b.name },
-              { key: "location", label: "Location", render: (b) => b.address || "—" },
-              { key: "phone", label: "Phone", render: (b) => b.phone || "—" },
-              { key: "email", label: "Email", render: (b) => b.email || "—" },
-            ]}
-            addLabel="Add branch"
-            onAdd={() =>
-              setEditing({
-                entity: "branch",
-                row: {
-                  id: "",
-                  name: "",
-                  address: "",
-                  phone: "",
-                  email: "",
-                  latitude: "",
-                  longitude: "",
-                  radiusM: "100",
-                  status: "ACTIVE",
-                },
-              })
-            }
-            onEdit={(row) => void editBranch(row)}
-            onDelete={(row) => void remove("branch", row.id)}
-            compact
-          />
+        <TabsContent value="branches" className="mt-4">
+          <BranchMaster onChanged={loadApiMasters} />
         </TabsContent>
 
         <TabsContent value="users" className="mt-4">
@@ -401,61 +290,21 @@ function MasterForm({
   branches: Branch[];
 }) {
   const [showPassword, setShowPassword] = useState(false);
-  const [locating, setLocating] = useState(false);
-  const [showMap, setShowMap] = useState(false);
   const set = (key: string, value: unknown) => onChange({ ...row, [key]: value });
-  const setCoordinates = (latitude: number, longitude: number) =>
-    onChange({
-      ...row,
-      latitude: latitude.toFixed(7),
-      longitude: longitude.toFixed(7),
-    });
   const str = (key: string) => (row[key] as string) ?? "";
   const isNew = !str("id");
-  const rowId = row.id;
-
-  const useCurrentLocation = () => {
-    if (!navigator.geolocation) {
-      toast.error("This browser does not support device location.");
-      return;
-    }
-    if (!window.isSecureContext) {
-      toast.error("Current location requires HTTPS. Open the application using its secure address.");
-      return;
-    }
-    setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      ({ coords }) => {
-        setCoordinates(coords.latitude, coords.longitude);
-        setLocating(false);
-        toast.success("Branch coordinates filled from your current location.");
-      },
-      (error) => {
-        const message =
-          error.code === error.PERMISSION_DENIED
-            ? "Allow location access in your browser to use your current location."
-            : error.code === error.POSITION_UNAVAILABLE
-              ? "Your device location is unavailable. Check location services and try again."
-              : "Location lookup timed out. Try again.";
-        toast.error(message);
-        setLocating(false);
-      },
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 },
-    );
-  };
+  const rowId = row["id"];
 
   useEffect(() => {
     setShowPassword(false);
-    setShowMap(false);
   }, [entity, rowId]);
 
   const titleMap: Record<Entity, string> = {
-    branch: "Branch",
     user: "User",
     role: "Role",
   };
 
-  const apiBacked = entity === "branch" || entity === "user" || entity === "role";
+  const apiBacked = true;
 
   return (
     <form
@@ -473,89 +322,6 @@ function MasterForm({
       </DialogHeader>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        {entity === "branch" ? (
-          <>
-            <Field label="Name" value={str("name")} onChange={(v) => set("name", v)} required />
-            <Field label="Phone" value={str("phone")} onChange={(v) => set("phone", v)} />
-            <Field label="Email" value={str("email")} onChange={(v) => set("email", v)} type="email" />
-            <div className="sm:col-span-2 space-y-1.5">
-              <Label>Location</Label>
-              <Textarea value={str("address")} onChange={(e) => set("address", e.target.value)} rows={2} />
-            </div>
-            <div className="sm:col-span-2 rounded-lg border border-border p-3">
-              <p className="text-[12px] font-semibold">Visitor check-in geofence</p>
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                Set the branch center coordinates to require visitors to be nearby before requesting or verifying a check-in email code. Use the branch’s verified map coordinates.
-              </p>
-            </div>
-            <div className="sm:col-span-2 grid gap-3 sm:grid-cols-2">
-              <Field
-                label="Latitude"
-                value={str("latitude")}
-                onChange={(v) => set("latitude", v)}
-                type="number"
-                step="any"
-                min="-90"
-                max="90"
-              />
-              <Field
-                label="Longitude"
-                value={str("longitude")}
-                onChange={(v) => set("longitude", v)}
-                type="number"
-                step="any"
-                min="-180"
-                max="180"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                disabled={locating}
-                onClick={useCurrentLocation}
-              >
-                <Crosshair className="size-4" />
-                {locating ? "Getting current location…" : "Use current location"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                onClick={() => setShowMap((visible) => !visible)}
-              >
-                <MapPin className="size-4" />
-                {showMap ? "Hide map" : "Choose on map"}
-              </Button>
-              {showMap ? (
-                <div className="sm:col-span-2 space-y-2">
-                  <p className="text-[11px] text-muted-foreground">
-                    Click the map to place or move the branch geofence center.
-                  </p>
-                  <BranchGeofenceMap
-                    latitude={str("latitude") ? Number(str("latitude")) : null}
-                    longitude={str("longitude") ? Number(str("longitude")) : null}
-                    onSelect={setCoordinates}
-                  />
-                  {str("latitude") && str("longitude") ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      Selected: {str("latitude")}, {str("longitude")}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <Field
-              label="Allowed radius (metres)"
-              value={str("radiusM") || "100"}
-              onChange={(v) => set("radiusM", v)}
-              type="number"
-              step="1"
-              min="25"
-              max="5000"
-            />
-          </>
-        ) : null}
-
         {entity === "user" ? (
           <>
             <input type="text" name="username" autoComplete="username" tabIndex={-1} aria-hidden className="sr-only" />

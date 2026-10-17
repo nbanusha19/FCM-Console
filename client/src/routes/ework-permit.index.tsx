@@ -62,10 +62,10 @@ function PermitDashboard() {
         eyebrow="E-Work Permit"
         title={
           user?.role === "HSE"
-            ? "Health & Safety dashboard"
+            ? "E-Work Permit dashboard"
             : user?.role === "SECURITY"
               ? "Security gate verification"
-              : "E-Work Permit overview"
+              : "E-Work Permit dashboard"
         }
         subtitle={subtitle}
       />

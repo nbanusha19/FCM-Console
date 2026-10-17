@@ -8,7 +8,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { APP_NAME } from "@/constants/brand";
 import { getWalkInOptions, getWalkInStatus, submitWalkIn } from "@/lib/walk-in.functions";
-import { branchHostOptionLabel, listBranchHosts, type BranchUser } from "@/services/visitor-requests";
+import {
+  businessTimeAfter,
+  isPastVisitStart,
+  todayBusinessISO,
+} from "@/lib/visit-schedule";
+import {
+  branchHostOptionLabel,
+  listBranchHosts,
+  type BranchUser,
+} from "@/services/visitor-requests";
 import { useQuery } from "@tanstack/react-query";
 
 export const Route = createFileRoute("/register")({
@@ -63,8 +72,13 @@ function Register() {
       .then(setOpts)
       .catch((error: unknown) => setOptionsError(error instanceof Error ? error.message : "Unable to load registration options."));
     const now = new Date();
-    const hh = (d: Date) => d.toTimeString().slice(0, 5);
-    setF((x) => ({ ...x, expected_arrival: hh(now), expected_departure: now.getHours() >= 23 ? "23:59" : hh(new Date(now.getTime() + 3600000)) }));
+    const arrival = businessTimeAfter(0, now);
+    const nextHour = businessTimeAfter(60, now);
+    setF((x) => ({
+      ...x,
+      expected_arrival: arrival,
+      expected_departure: nextHour > arrival ? nextHour : "23:59",
+    }));
   }, []);
   useEffect(() => {
     if (!sent || st !== "PENDING") return;
@@ -90,6 +104,9 @@ function Register() {
     }
     if (f.purpose.trim().length < 3) e.purpose = "Tell us why you're visiting.";
     if (!f.host_id) e.host_id = "Choose who you are visiting.";
+    if (isPastVisitStart(todayBusinessISO(), f.expected_arrival)) {
+      e.expected_arrival = "Invalid time. Please select a proper time schedule.";
+    }
     if (f.expected_departure <= f.expected_arrival) e.expected_departure = "End time must be after start time.";
     setErr(e);
     return !Object.keys(e).length;
@@ -282,7 +299,7 @@ function Register() {
                 </Select>
               </Field>
               <div className="grid grid-cols-2 gap-2">
-                <Field label="Start">{inp("expected_arrival", { type: "time" })}</Field>
+                <Field label="Start" error={err.expected_arrival}>{inp("expected_arrival", { type: "time" })}</Field>
                 <Field label="End" error={err.expected_departure}>{inp("expected_departure", { type: "time" })}</Field>
               </div>
               <div className="sm:col-span-2"><Field label="Remarks" error={err.remarks}><Textarea value={f.remarks} onChange={(e) => set("remarks", e.target.value)} /></Field></div>

@@ -1,5 +1,4 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import type { CSSProperties } from "react";
 import {
   BadgeCheck,
   ClipboardCheck,
@@ -13,10 +12,9 @@ import {
 } from "lucide-react";
 import { AppPage } from "@/components/layout/AppPage";
 import { ModuleLauncherCard } from "@/components/common/ModuleLauncherCard";
-import { AppIcon } from "@/components/common/AppIcon";
-import { APP_NAME, APP_TAGLINE } from "@/constants/brand";
+import { APP_NAME } from "@/constants/brand";
 import { useApp } from "@/context/app-context";
-import { modulesForRole } from "@/constants/modules";
+import { CONSOLE_MODULES } from "@/constants/modules";
 
 export const Route = createFileRoute("/home")({
   head: () => ({
@@ -44,50 +42,24 @@ const ARTWORK: Record<string, { main: typeof ContactRound; detail: typeof BadgeC
   emergency: { main: MapPinned, detail: ShieldAlert },
 };
 
-const TILE_TONES: Record<string, string> = {
-  vms: "home-launcher-tile--visitors",
-  eworkpermit: "home-launcher-tile--permit",
-  helpdesk: "home-launcher-tile--helpdesk",
-  emergency: "home-launcher-tile--emergency",
+const TILE_LABELS: Record<string, string> = {
+  vms: "FCM Visitor Management",
+  eworkpermit: "FCM E-WORK Permit",
+  helpdesk: "FCM Helpdesk",
+  emergency: "FCM Emergency Evacuation",
 };
-
-const TILE_HORIZONTAL_GAP = "gap-x-0 sm:gap-x-10";
-const TILE_VERTICAL_GAP = "gap-y-0 sm:gap-y-10";
-const TILE_WIDTH = "492px";
-const TILE_HEIGHT = "clamp(188px, 38svh, 340px)";
 
 function HomePage() {
   const { user } = useApp();
-  const modules = user ? modulesForRole(user.role) : [];
+  const modules = CONSOLE_MODULES.map((module) => ({
+    ...module,
+    available: Boolean(user && module.available && module.roles.includes(user.role)),
+  }));
 
   return (
     <AppPage>
-      <div className="relative min-h-svh w-full p-5 sm:flex sm:items-center sm:p-7 lg:p-16">
-        <Link
-          to="/home"
-          aria-label="Go to home page"
-          title="Home"
-          className="absolute left-5 top-5 z-10 flex items-center gap-2.5 rounded-xl focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-4 sm:left-7 sm:top-7 lg:left-16 lg:top-8"
-        >
-          <AppIcon />
-          <span className="leading-tight">
-            <span className="block font-display text-[13px] font-extrabold tracking-tight">
-              {APP_NAME}
-            </span>
-            <span className="block text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-              {APP_TAGLINE}
-            </span>
-          </span>
-        </Link>
-        <div
-          style={
-            {
-              "--launcher-tile-width": TILE_WIDTH,
-              "--launcher-tile-height": TILE_HEIGHT,
-            } as CSSProperties
-          }
-          className={`home-launcher-grid grid w-full min-h-[calc(100svh-2rem)] grid-cols-1 sm:min-h-[calc(100svh-3rem)] sm:grid-cols-2 lg:min-h-[calc(100svh-9rem)] ${TILE_HORIZONTAL_GAP} ${TILE_VERTICAL_GAP}`}
-        >
+      <div className="grid h-full min-h-0 flex-1 place-items-center overflow-hidden p-2 sm:p-4">
+        <div className="home-launcher-grid grid h-full max-h-[680px] w-full max-w-[1024px] grid-cols-2 grid-rows-2 gap-2 sm:gap-6">
           {modules.map((mod, index) => {
             const { main: MainIcon, detail: DetailIcon } = ARTWORK[mod.key] ?? {
               main: ClipboardCheck,
@@ -95,13 +67,11 @@ function HomePage() {
             };
             const card = (
               <ModuleLauncherCard
-                module={mod}
+                module={{ ...mod, name: TILE_LABELS[mod.key] ?? mod.name }}
                 mainIcon={MainIcon}
                 detailIcon={DetailIcon}
-                toneClass={TILE_TONES[mod.key] ?? ""}
                 animationDelay={index * 75}
-                width={`min(100%, ${TILE_WIDTH})`}
-                height={TILE_HEIGHT}
+                unavailableLabel="Not operational"
               />
             );
 
@@ -114,7 +84,11 @@ function HomePage() {
                 {card}
               </Link>
             ) : (
-              <div key={mod.key} className="grid h-full cursor-not-allowed place-items-center">
+              <div
+                key={mod.key}
+                className="grid h-full cursor-not-allowed place-items-center"
+                aria-disabled="true"
+              >
                 {card}
               </div>
             );

@@ -1,9 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
-import { MessageSquareText, Star } from "lucide-react";
+import { Eye, MessageSquareText, Star } from "lucide-react";
 import { toast } from "sonner";
 import { AppPage } from "@/components/layout/AppPage";
 import { PageHeader } from "@/components/common/PageHeader";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { EmptyRow, TableCard, usePaged } from "@/components/common/TableCard";
 import {
   Table,
@@ -26,11 +34,13 @@ export const Route = createFileRoute("/hd-feedback")({
 
 function FeedbackPage() {
   const [feedback, setFeedback] = useState<HdFeedback[]>([]);
+  const [selectedFeedback, setSelectedFeedback] = useState<HdFeedback | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const paged = usePaged(
     feedback.filter((item) =>
       [
+        item.ticket_no,
         item.building_name,
         item.branch_name,
         item.floor_name,
@@ -61,8 +71,8 @@ function FeedbackPage() {
     <div className="space-y-6">
       <PageHeader
         eyebrow="FCM Helpdesk"
-        title="Building feedback"
-        subtitle="Feedback submitted from geofenced building QR codes."
+        title="Helpdesk feedback"
+        subtitle="Building and ticket feedback submitted through Helpdesk."
       />
       <TableCard
         search={query}
@@ -81,11 +91,12 @@ function FeedbackPage() {
               <TableHead>Feedback</TableHead>
               <TableHead>Submitted by</TableHead>
               <TableHead>Date</TableHead>
+              <TableHead className="text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {paged.rows.length === 0 ? (
-              <EmptyRow cols={5}>
+              <EmptyRow cols={6}>
                 <MessageSquareText className="mx-auto mb-2 size-8" />
                 {loading ? "Loading feedback…" : "No feedback has been submitted yet."}
               </EmptyRow>
@@ -93,10 +104,14 @@ function FeedbackPage() {
               paged.rows.map((item) => (
                 <TableRow key={item.id}>
                   <TableCell>
-                    <p className="font-semibold">{item.building_name}</p>
+                    <p className="font-semibold">
+                      {item.ticket_no ? `Ticket ${item.ticket_no}` : item.building_name}
+                    </p>
                     <p className="text-[12px] text-muted-foreground">
-                      {[item.floor_name, item.area_name].filter(Boolean).join(" · ") ||
-                        "Building-wide"}
+                      {item.ticket_no
+                        ? item.building_name
+                        : [item.floor_name, item.area_name].filter(Boolean).join(" · ") ||
+                          "Building-wide"}
                     </p>
                   </TableCell>
                   <TableCell>
@@ -123,12 +138,79 @@ function FeedbackPage() {
                   <TableCell className="text-[12px] text-muted-foreground">
                     {new Date(item.created_at).toLocaleString()}
                   </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      title="View feedback"
+                      aria-label={`View feedback from ${item.submitted_by_name}`}
+                      onClick={() => setSelectedFeedback(item)}
+                    >
+                      <Eye className="size-4" />
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
       </TableCard>
+      <Dialog
+        open={selectedFeedback !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedFeedback(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {selectedFeedback?.ticket_no
+                ? `Feedback for ticket ${selectedFeedback.ticket_no}`
+                : "Building feedback"}
+            </DialogTitle>
+            <DialogDescription>
+              {selectedFeedback
+                ? `${selectedFeedback.building_name} · ${
+                    selectedFeedback.ticket_no
+                      ? "Ticket feedback"
+                      : [selectedFeedback.floor_name, selectedFeedback.area_name]
+                          .filter(Boolean)
+                          .join(" · ") || "Building-wide"
+                  }`
+                : "Feedback details"}
+            </DialogDescription>
+          </DialogHeader>
+          {selectedFeedback ? (
+            <div className="space-y-4">
+              <div className="grid gap-3 rounded-lg bg-muted/40 p-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground">Submitted by</p>
+                  <p>{selectedFeedback.submitted_by_name}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground">Branch</p>
+                  <p>{selectedFeedback.branch_name || "—"}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground">Rating</p>
+                  <p>{selectedFeedback.rating ? `${selectedFeedback.rating} / 5` : "Not rated"}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground">Submitted</p>
+                  <p>{new Date(selectedFeedback.created_at).toLocaleString()}</p>
+                </div>
+              </div>
+              <section className="space-y-1">
+                <h3 className="text-sm font-semibold">Feedback</h3>
+                <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                  {selectedFeedback.feedback}
+                </p>
+              </section>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

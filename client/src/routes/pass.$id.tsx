@@ -4,8 +4,6 @@ import { useEffect, useState } from "react";
 import { QrImage } from "@/components/common/QrImage";
 import { APP_NAME } from "@/constants/brand";
 import { checkOutVisitorWithEmailPass, getVisitorPass } from "@/lib/visitor-pass.functions";
-import { downloadPass } from "@/lib/download-pass";
-import { printVisitorPass } from "@/lib/print-visitor-pass";
 import { getVisitorCardPhoto } from "@/services/visitor-card-local";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -79,6 +77,7 @@ function PassPage() {
     queryFn: () => getVisitorPass({ data: { id, token } }),
     enabled: Boolean(token),
     retry: false,
+    refetchInterval: 30_000,
   });
   useEffect(() => {
     const params = new URLSearchParams(window.location.hash.slice(1));
@@ -86,6 +85,12 @@ function PassPage() {
     setOrigin(window.location.origin);
     setPhoto(getVisitorCardPhoto(id));
   }, [id]);
+  useEffect(() => {
+    if (v && !v.check_in_available && otpDestination) {
+      setOtpDestination(null);
+      setCheckInOtp("");
+    }
+  }, [otpDestination, v]);
   const qrValue = `${origin}/pass/${encodeURIComponent(id)}#token=${token}`;
   if (!token) return <Msg text="This pass link is incomplete. Open the secure link from your invitation email." />;
   if (!origin) return <Msg text="Loading visitor pass…" />;
@@ -166,10 +171,16 @@ function PassPage() {
           </dl>
           {["APPROVED", "CARD_ISSUED"].includes(v.status) ? (
             <div className="w-full space-y-3">
-              <p className="text-center text-[12px] text-muted-foreground">
-                Location is required. Be within your branch’s configured check-in area to receive and verify an email code.
-              </p>
-              {otpDestination ? (
+              {v.check_in_available ? (
+                <p className="text-center text-[12px] text-muted-foreground">
+                  Location is required. Be within your branch’s configured check-in area to receive and verify an email code.
+                </p>
+              ) : (
+                <p className="rounded-lg bg-muted px-3 py-2 text-center text-[12px] text-muted-foreground" role="status">
+                  {v.check_in_window_message}
+                </p>
+              )}
+              {v.check_in_available && otpDestination ? (
                 <>
                   <p className="text-[12px] text-muted-foreground">
                     Verification code sent to <strong>{otpDestination}</strong>. The code expires in 10 minutes.
@@ -206,11 +217,11 @@ function PassPage() {
                     {checkingIn ? "Sending…" : "Resend code"}
                   </Button>
                 </>
-              ) : (
+              ) : v.check_in_available ? (
                 <Button type="button" className="w-full" disabled={checkingIn} onClick={() => void checkIn()}>
                   {checkingIn ? "Checking location and sending code…" : "Check in now"}
                 </Button>
-              )}
+              ) : null}
             </div>
           ) : v.status === "CHECKED_IN" ? (
             <div className="w-full space-y-2">
@@ -223,22 +234,9 @@ function PassPage() {
             </div>
           ) : (
             <p className="w-full rounded-xl bg-emerald-50 px-4 py-3 text-center text-[13px] font-semibold text-emerald-800">
-              {v.status === "CHECKED_OUT" ? "Check-out complete. Thank you for visiting." : "Check-in complete. This printable QR pass is your guest card."}
+              {v.status === "CHECKED_OUT" ? "Check-out complete. Thank you for visiting." : "Check-in complete."}
             </p>
           )}
-          <button
-            type="button"
-            onClick={() =>
-              void printVisitorPass().catch((error: unknown) =>
-                toast.error(error instanceof Error ? error.message : "Unable to print visitor pass."),
-              )
-            }
-            className="w-full rounded-xl border border-border px-4 py-3 text-[15px] font-semibold print:hidden"
-          >
-            Print QR confirmation
-          </button>
-          <button type="button" onClick={() => void downloadPass({ ...v, qr_value: qrValue, requested_by_name: v.host_name, photo }).catch((error: unknown) => alert(error instanceof Error ? `Download failed: ${error.message}` : "Download failed."))} className="mt-2 w-full rounded-xl bg-primary px-4 py-3 text-[15px] font-semibold text-primary-foreground print:hidden">Download pass to phone</button>
-          <p className="mt-2 text-center text-[12px] text-muted-foreground print:hidden">This printable QR pass is your guest card. Return the printed pass to Security manually before checking out.</p>
         </div>
       </div>
     </main>

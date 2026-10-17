@@ -34,7 +34,7 @@ export const Route = createFileRoute("/hd-qr")({
     ],
   }),
   component: () => (
-    <AppPage roles={["ADMIN", "BRANCH_MANAGER", "EMPLOYEE"]}>
+    <AppPage roles={["ADMIN"]}>
       <QrPage />
     </AppPage>
   ),

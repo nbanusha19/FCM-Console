@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { Bell, ChevronDown, LogOut, Menu, Search, UserRound, X } from "lucide-react";
+import { Bell, ChevronDown, Grid2X2, LogOut, Menu, Search, UserRound, X } from "lucide-react";
 import { useApp, type Theme } from "@/context/app-context";
 import { Palette, Check } from "lucide-react";
 import { EmergencyBanner } from "@/components/emergency/EmergencyBanner";
@@ -16,7 +16,7 @@ const THEME_OPTIONS: { id: Theme; label: string; swatch: string }[] = [
 ];
 import { useVms } from "@/hooks/use-vms";
 import { listVisitRequests } from "@/services/visitor-requests";
-import { HOME_BY_ROLE, NAV_BY_ROLE, ROLE_LABEL } from "@/constants/nav";
+import { NAV_BY_ROLE, ROLE_LABEL } from "@/constants/nav";
 import { APP_NAME, APP_TAGLINE } from "@/constants/brand";
 import { modulesForRole } from "@/constants/modules";
 import { initials, relativeTime } from "@/lib/format";
@@ -44,11 +44,10 @@ import { StatusPill } from "@/components/common/StatusBadge";
 const PRIMARY_COUNT = 7;
 const MODULE_ROUTE_PREFIXES = {
   vms: ["/visitors", "/vms-", "/gate-desk", "/registration-qr", "/masters", "/activity"],
-  eworkpermit: ["/ework-permit"],
+  eworkpermit: ["/ework-permit", "/ework-permit-"],
   helpdesk: ["/helpdesk", "/hd-"],
   emergency: ["/emergency"],
 } as const;
-
 function routeMatchesPrefix(route: string, prefix: string) {
   return prefix.endsWith("-")
     ? route.startsWith(prefix)
@@ -67,6 +66,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const isHomePage = pathname === "/home";
   const isReferencePage =
     pathname === "/vms-dashboard" ||
     pathname === "/visitors" ||
@@ -81,6 +81,30 @@ export function AppShell({ children }: { children: ReactNode }) {
     pathname === "/gate-desk" ||
     pathname === "/registration-qr";
   const activeModule = moduleForRoute(pathname);
+  const moduleBrandName = activeModule
+    ? {
+        vms: "FCM VMS",
+        eworkpermit: "FCM E-Work Permit",
+        helpdesk: "FCM Helpdesk",
+        emergency: "FCM Emergency Evacuation",
+      }[activeModule]
+    : settings.appName || APP_NAME;
+  const moduleBrandTagline = activeModule
+    ? {
+        vms: "Visitor Management System",
+        eworkpermit: "E-Work Permit Portal",
+        helpdesk: "Helpdesk Portal",
+        emergency: "Emergency Evacuation Portal",
+      }[activeModule]
+    : APP_TAGLINE;
+  const brandInitial = activeModule
+    ? {
+        vms: "V",
+        eworkpermit: "E",
+        helpdesk: "H",
+        emergency: "E",
+      }[activeModule]
+    : "F";
   const isHelpdeskModule = activeModule === "helpdesk";
   const showVmsNotifications = activeModule === "vms" || pathname === "/notifications";
   const isVmsStaff = user && ["ADMIN", "BRANCH_MANAGER", "SECURITY"].includes(user.role);
@@ -141,8 +165,22 @@ export function AppShell({ children }: { children: ReactNode }) {
           .filter((module) => module.key !== activeModule)
           .map((module) => ({ to: module.to, label: module.name }))
     : [];
-  const primary =
-    activeModule === "vms" && isVmsStaff
+  const homeModuleLinks = user
+    ? modulesForRole(user.role).map((module) => ({
+        to: module.to,
+        label:
+          module.key === "vms"
+            ? "FCM VMS"
+            : module.key === "eworkpermit"
+              ? "FCM E-Work Permit"
+              : module.key === "helpdesk"
+                ? "FCM Helpdesk"
+                : "FCM Evacuation",
+      }))
+    : [];
+  const primary = isHomePage
+    ? homeModuleLinks
+    : activeModule === "vms" && isVmsStaff
       ? vmsPrimary.filter((link) => moduleItems.some((item) => item.to === link.to))
       : activeModule === "vms" && user?.role === "EMPLOYEE"
         ? [
@@ -160,8 +198,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     { to: "/activity", label: "Activity Log" },
     ...(user?.role === "ADMIN" ? [{ to: "/settings", label: "Settings" }] : []),
   ];
-  const overflow =
-    activeModule === "vms" && isVmsStaff
+  const overflow = isHomePage
+    ? []
+    : activeModule === "vms" && isVmsStaff
       ? vmsMoreItems
       : [
           ...moduleItems.filter(
@@ -172,7 +211,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           ),
         ];
   const showMoreMenu =
-    (activeModule === "vms" && user?.role !== "EMPLOYEE") || activeModule === undefined;
+    !isHomePage &&
+    ((activeModule === "vms" && user?.role !== "EMPLOYEE") || activeModule === undefined);
   const menuItems = [...primary, ...overflow];
 
   const myNotifications = showVmsNotifications ? (vmsNotificationsQuery.data ?? []) : [];
@@ -318,29 +358,29 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [query, visitorRequestsQuery.data, user]);
 
   const isActive = (to: string) => pathname === to || (to !== "/" && pathname.startsWith(`${to}/`));
-  if (pathname === "/home") return <>{children}</>;
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-40">
+    <div
+      className={
+        isHomePage
+          ? "flex h-svh flex-col overflow-hidden bg-background text-foreground"
+          : "min-h-screen bg-background text-foreground"
+      }
+    >
+      <header className="sticky top-0 z-40 shrink-0">
         <div className="w-full px-4 pt-4 sm:px-6 lg:px-8">
           <div className="floating-bar flex items-center gap-3 px-4 py-2.5">
-            <Link
-              to={user ? (HOME_BY_ROLE[user.role] as "/home") : "/"}
-              className="flex items-center gap-2.5 pr-2"
-              aria-label="Go to home page"
-              title="Home"
-            >
-              <AppIcon />
+            <div className="flex items-center gap-2.5 pr-2">
+              <AppIcon initial={brandInitial} />
               <span className="leading-tight">
                 <span className="block font-display text-[13px] font-extrabold tracking-tight">
-                  {isVmsPage ? "VMS" : settings.appName || APP_NAME}
+                  {moduleBrandName}
                 </span>
                 <span className="block text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                  {isVmsPage ? "Visitor Management System" : APP_TAGLINE}
+                  {isVmsPage ? "Visitor Management System" : moduleBrandTagline}
                 </span>
               </span>
-            </Link>
+            </div>
 
             <nav className="hidden items-center gap-1 lg:flex">
               {primary.map((item) => (
@@ -438,120 +478,134 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </Popover>
               ) : null}
 
-              <Popover
-                onOpenChange={(open) => {
-                  if (!open && showVmsNotifications) void markVmsNotificationsRead();
-                  if (!open && activeModule === "eworkpermit") {
-                    void markEwpNotificationsReadOnClose();
-                  }
-                }}
-              >
-                <PopoverTrigger asChild>
-                  <button className="relative grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:text-foreground">
-                    <Bell className="size-4" />
-                    {activeModuleUnread ? (
-                      <span className="absolute right-1 top-1 grid min-w-4 place-items-center rounded-full bg-danger px-1 text-[9px] font-bold text-primary-foreground ring-2 ring-card">
-                        {activeModuleUnread}
-                      </span>
-                    ) : null}
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent align="end" className="w-96 p-0">
-                  <div className="flex items-center justify-between border-b border-border px-4 py-3">
-                    <p className="font-display text-[14px] font-bold">Notifications</p>
-                    {showVmsNotifications ? (
-                      <Link
-                        to="/notifications"
-                        className="text-[12px] font-semibold text-primary hover:underline"
-                      >
-                        View all
-                      </Link>
-                    ) : null}
-                  </div>
-                  <div className="max-h-96 divide-y divide-border overflow-auto">
-                    {headerNotifications.map((n) => (
-                      <div key={`${n.source}-${n.id}`} className="px-4 py-3">
-                        <div className="flex items-start gap-2">
-                          <span
-                            className={cn(
-                              "mt-1.5 size-2 shrink-0 rounded-full",
-                              n.isRead ? "bg-border" : "bg-primary",
-                            )}
-                          />
-                          <div className="min-w-0">
-                            <p className="text-[13px] font-semibold">{n.title}</p>
-                            <p className="text-[12px] text-muted-foreground">{n.message}</p>
-                            <p className="mt-1 text-[11px] text-muted-foreground">
-                              {n.createdAt ? relativeTime(n.createdAt) : "—"}
-                            </p>
+              {activeModule ? (
+                <Link
+                  to="/home"
+                  aria-label="Go to the apps home page"
+                  title="Apps"
+                  className="flex h-9 items-center justify-center gap-2 rounded-xl border border-border bg-card px-2.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted"
+                >
+                  <Grid2X2 className="size-4" />
+                  <span className="hidden sm:inline">Apps</span>
+                </Link>
+              ) : null}
+
+              {!isHomePage ? (
+                <Popover
+                  onOpenChange={(open) => {
+                    if (!open && showVmsNotifications) void markVmsNotificationsRead();
+                    if (!open && activeModule === "eworkpermit") {
+                      void markEwpNotificationsReadOnClose();
+                    }
+                  }}
+                >
+                  <PopoverTrigger asChild>
+                    <button className="relative grid size-9 place-items-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:text-foreground">
+                      <Bell className="size-4" />
+                      {activeModuleUnread ? (
+                        <span className="absolute right-1 top-1 grid min-w-4 place-items-center rounded-full bg-danger px-1 text-[9px] font-bold text-primary-foreground ring-2 ring-card">
+                          {activeModuleUnread}
+                        </span>
+                      ) : null}
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-96 p-0">
+                    <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                      <p className="font-display text-[14px] font-bold">Notifications</p>
+                      {showVmsNotifications ? (
+                        <Link
+                          to="/notifications"
+                          className="text-[12px] font-semibold text-primary hover:underline"
+                        >
+                          View all
+                        </Link>
+                      ) : null}
+                    </div>
+                    <div className="max-h-96 divide-y divide-border overflow-auto">
+                      {headerNotifications.map((n) => (
+                        <div key={`${n.source}-${n.id}`} className="px-4 py-3">
+                          <div className="flex items-start gap-2">
+                            <span
+                              className={cn(
+                                "mt-1.5 size-2 shrink-0 rounded-full",
+                                n.isRead ? "bg-border" : "bg-primary",
+                              )}
+                            />
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-semibold">{n.title}</p>
+                              <p className="text-[12px] text-muted-foreground">{n.message}</p>
+                              <p className="mt-1 text-[11px] text-muted-foreground">
+                                {n.createdAt ? relativeTime(n.createdAt) : "—"}
+                              </p>
+                            </div>
                           </div>
+                          {n.source === "helpdesk" ? (
+                            <button
+                              type="button"
+                              className="mt-2 text-[11px] font-semibold text-primary hover:underline"
+                              onClick={() => {
+                                const notification = helpdeskNotifications.find(
+                                  (item) => item.id === n.id,
+                                );
+                                if (notification) void openHelpdeskNotification(notification);
+                              }}
+                            >
+                              Open ticket
+                            </button>
+                          ) : null}
+                          {n.source === "ewp" ? (
+                            <Link
+                              to="/ework-permit/$id"
+                              params={{ id: n.permitId }}
+                              className="mt-2 inline-block text-[11px] font-semibold text-primary hover:underline"
+                              onClick={() => void openEwpNotification(n.id)}
+                            >
+                              Open permit {n.permitNo}
+                            </Link>
+                          ) : null}
                         </div>
-                        {n.source === "helpdesk" ? (
-                          <button
-                            type="button"
-                            className="mt-2 text-[11px] font-semibold text-primary hover:underline"
-                            onClick={() => {
-                              const notification = helpdeskNotifications.find(
-                                (item) => item.id === n.id,
-                              );
-                              if (notification) void openHelpdeskNotification(notification);
-                            }}
-                          >
-                            Open ticket
-                          </button>
-                        ) : null}
-                        {n.source === "ewp" ? (
-                          <Link
-                            to="/ework-permit/$id"
-                            params={{ id: n.permitId }}
-                            className="mt-2 inline-block text-[11px] font-semibold text-primary hover:underline"
-                            onClick={() => void openEwpNotification(n.id)}
-                          >
-                            Open permit {n.permitNo}
-                          </Link>
-                        ) : null}
-                      </div>
-                    ))}
-                    {isHelpdeskModule &&
-                    helpdeskNotificationsQuery.isLoading &&
-                    myNotifications.length === 0 ? (
-                      <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
-                        Loading notifications…
-                      </p>
-                    ) : null}
-                    {isHelpdeskModule && helpdeskNotificationsQuery.isError ? (
-                      <p className="px-4 py-3 text-center text-[12px] text-destructive">
-                        Helpdesk notifications could not be loaded.
-                      </p>
-                    ) : null}
-                    {showVmsNotifications && vmsNotificationsQuery.isLoading ? (
-                      <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
-                        Loading VMS notifications…
-                      </p>
-                    ) : null}
-                    {showVmsNotifications && vmsNotificationsQuery.isError ? (
-                      <p className="px-4 py-3 text-center text-[12px] text-destructive">
-                        VMS notifications could not be loaded.
-                      </p>
-                    ) : null}
-                    {activeModule === "eworkpermit" && ewpNotificationsQuery.isLoading ? (
-                      <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
-                        Loading E-Work Permit notifications…
-                      </p>
-                    ) : null}
-                    {activeModule === "eworkpermit" && ewpNotificationsQuery.isError ? (
-                      <p className="px-4 py-3 text-center text-[12px] text-destructive">
-                        E-Work Permit notifications could not be loaded.
-                      </p>
-                    ) : null}
-                    {notificationFeedsLoaded && headerNotifications.length === 0 ? (
-                      <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
-                        Nothing new right now.
-                      </p>
-                    ) : null}
-                  </div>
-                </PopoverContent>
-              </Popover>
+                      ))}
+                      {isHelpdeskModule &&
+                      helpdeskNotificationsQuery.isLoading &&
+                      myNotifications.length === 0 ? (
+                        <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
+                          Loading notifications…
+                        </p>
+                      ) : null}
+                      {isHelpdeskModule && helpdeskNotificationsQuery.isError ? (
+                        <p className="px-4 py-3 text-center text-[12px] text-destructive">
+                          Helpdesk notifications could not be loaded.
+                        </p>
+                      ) : null}
+                      {showVmsNotifications && vmsNotificationsQuery.isLoading ? (
+                        <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
+                          Loading VMS notifications…
+                        </p>
+                      ) : null}
+                      {showVmsNotifications && vmsNotificationsQuery.isError ? (
+                        <p className="px-4 py-3 text-center text-[12px] text-destructive">
+                          VMS notifications could not be loaded.
+                        </p>
+                      ) : null}
+                      {activeModule === "eworkpermit" && ewpNotificationsQuery.isLoading ? (
+                        <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
+                          Loading E-Work Permit notifications…
+                        </p>
+                      ) : null}
+                      {activeModule === "eworkpermit" && ewpNotificationsQuery.isError ? (
+                        <p className="px-4 py-3 text-center text-[12px] text-destructive">
+                          E-Work Permit notifications could not be loaded.
+                        </p>
+                      ) : null}
+                      {notificationFeedsLoaded && headerNotifications.length === 0 ? (
+                        <p className="px-4 py-6 text-center text-[12px] text-muted-foreground">
+                          Nothing new right now.
+                        </p>
+                      ) : null}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              ) : null}
 
               <DropdownMenu>
                 <DropdownMenuTrigger
@@ -655,8 +709,14 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </header>
 
-      <div className="w-full px-4 py-7 sm:px-6 lg:px-8">
-        <main className="min-w-0">
+      <div
+        className={
+          isHomePage
+            ? "flex min-h-0 w-full flex-1 flex-col overflow-hidden px-4 py-2 sm:px-6 lg:px-8"
+            : "w-full px-4 py-7 sm:px-6 lg:px-8"
+        }
+      >
+        <main className={isHomePage ? "flex min-h-0 flex-1 flex-col overflow-hidden" : "min-w-0"}>
           <div className="-mt-4 mb-4 empty:hidden">
             <EmergencyBanner />
           </div>

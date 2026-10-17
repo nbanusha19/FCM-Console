@@ -65,14 +65,19 @@ export interface HdBuildingArea {
 }
 export interface HdBuildingFloor {
   id: string;
-  building_id: string;
+  building_id: string | null;
   name: string;
+  floor_number?: string;
+  floor_name?: string;
   active: boolean;
   created_at?: string;
   updated_at?: string;
 }
 export interface HdFeedback {
   id: string;
+  feedback_type?: "TICKET" | "BUILDING";
+  ticket_id?: string;
+  ticket_no?: string;
   branch_id: string;
   branch_name: string;
   building_id: string;
@@ -116,6 +121,48 @@ export interface HdTicket {
   updated_at: string;
   provider_notification_status?: "SENT" | "PARTIAL" | "FAILED" | "NO_RECIPIENT";
   provider_in_app_notification_status?: "SENT" | "FAILED" | "NO_RECIPIENT";
+  feedback_submitted?: boolean;
+}
+
+export interface HdFeedbackTicketOption {
+  id: string;
+  ticket_no: string;
+  category_name: string;
+  description: string;
+  status: string;
+  created_at: string;
+  feedback_submitted: boolean;
+}
+
+export interface HdPublicTicketHistory {
+  ticket: {
+    id: string;
+    ticket_no: string;
+    category_name: string;
+    subcategory_name: string;
+    description: string;
+    location: string;
+    priority: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+    closed_at: string;
+  };
+  events: Array<{
+    action: string;
+    remarks: string;
+    performed_by_name: string;
+    created_at: string;
+  }>;
+}
+
+export interface PublicHelpdeskBootstrap {
+  building: HdBuilding;
+  floors: HdBuildingFloor[];
+  areas: HdBuildingArea[];
+  categories: HdCategory[];
+  subcategories: HdSubcategory[];
+  services: HdService[];
 }
 export interface HdEvidence {
   id: string;
@@ -202,21 +249,69 @@ export const catalogService = {
     if (error) fail(error, "Unable to save the Helpdesk building.");
   },
   async deleteBuilding(id: string): Promise<void> {
+    const [tickets, feedback] = await Promise.all([
+      localDb.from(T).select("id").eq("building_id", id).limit(1),
+      feedbackService.list(),
+    ]);
+    if (tickets.error) fail(tickets.error, "Unable to check building tickets.");
+    if (tickets.data?.length || feedback.some((record) => record.building_id === id)) {
+      throw new Error("This building is used by tickets or feedback and cannot be deleted.");
+    }
     const { error } = await localDb.from("hd_buildings").delete().eq("id", id);
     if (error) fail(error, "Unable to delete the Helpdesk building.");
   },
-  async listBuildingFloors(buildingId?: string): Promise<HdBuildingFloor[]> {
-    let query = localDb.from("hd_building_floors").select("*").order("name");
-    if (buildingId) query = query.eq("building_id", buildingId);
+  async listBuildingFloors(_buildingId?: string): Promise<HdBuildingFloor[]> {
+    const query = localDb.from("hd_building_floors").select("*").order("name");
     const { data, error } = await query;
     if (error) fail(error, "Unable to load building floors.");
     return (data ?? []) as HdBuildingFloor[];
   },
   async saveBuildingFloor(
-    row: Partial<HdBuildingFloor> & { building_id: string; name: string },
+    row: Partial<HdBuildingFloor> & {
+      building_id?: string | null;
+      name: string;
+      floor_number?: string;
+      floor_name?: string;
+    },
   ): Promise<void> {
     const { error } = await localDb.from("hd_building_floors").upsert(row);
     if (error) fail(error, "Unable to save the building floor.");
+  },
+  async deleteBuildingFloor(id: string): Promise<void> {
+    const { data: floor, error: floorError } = await localDb
+      .from("hd_building_floors")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (floorError) fail(floorError, "Unable to load the floor before deleting it.");
+    if (!floor) return;
+    const [floors, areas, tickets, feedback] = await Promise.all([
+      catalogService.listBuildingFloors(),
+      localDb.from("hd_building_areas").select("*"),
+      localDb.from(T).select("*"),
+      feedbackService.list(),
+    ]);
+    const normalized = (value: string | null | undefined) => (value ?? "").trim().toLowerCase();
+    const duplicateRemains = floors.some(
+      (candidate) =>
+        candidate.id !== floor.id &&
+        normalized(candidate.building_id) === normalized(floor.building_id) &&
+        normalized(candidate.name) === normalized(floor.name) &&
+        normalized(candidate.floor_number || candidate.name) ===
+          normalized(floor.floor_number || floor.name),
+    );
+    if (areas.error) fail(areas.error, "Unable to check floor areas.");
+    if (tickets.error) fail(tickets.error, "Unable to check floor tickets.");
+    if (
+      !duplicateRemains &&
+      ((areas.data ?? []).some((area) => area.floor === floor.name) ||
+        (tickets.data ?? []).some((ticket) => ticket.floor_name === floor.name) ||
+        feedback.some((record) => record.floor_name === floor.name))
+    ) {
+      throw new Error("This floor is used by areas, tickets, or feedback and cannot be deleted.");
+    }
+    const { error } = await localDb.from("hd_building_floors").delete().eq("id", id);
+    if (error) fail(error, "Unable to delete the building floor.");
   },
   async listBuildingAreas(buildingId?: string): Promise<HdBuildingArea[]> {
     let query = localDb.from("hd_building_areas").select("*").order("floor").order("name");
@@ -230,6 +325,18 @@ export const catalogService = {
   ): Promise<void> {
     const { error } = await localDb.from("hd_building_areas").upsert(row);
     if (error) fail(error, "Unable to save the building area.");
+  },
+  async deleteBuildingArea(id: string): Promise<void> {
+    const [tickets, feedback] = await Promise.all([
+      localDb.from(T).select("id").eq("building_area_id", id).limit(1),
+      feedbackService.list(),
+    ]);
+    if (tickets.error) fail(tickets.error, "Unable to check area tickets.");
+    if (tickets.data?.length || feedback.some((record) => record.area_id === id)) {
+      throw new Error("This area is used by tickets or feedback and cannot be deleted.");
+    }
+    const { error } = await localDb.from("hd_building_areas").delete().eq("id", id);
+    if (error) fail(error, "Unable to delete the building area.");
   },
   async saveCategory(row: Partial<HdCategory> & { name: string }): Promise<void> {
     const { error } = await localDb.from("hd_categories").upsert(row);
@@ -548,30 +655,6 @@ export const ticketService = {
     await requireClosureEvidence(ticket);
   },
 
-  async assign(ticket: HdTicket, provider: HdProvider, user: AppUser): Promise<HdTicket> {
-    const { data, error } = await localDb
-      .from(T)
-      .update({
-        provider_id: provider.id,
-        provider_name: provider.name,
-        status: "ASSIGNED",
-        assigned_at: new Date().toISOString(),
-      })
-      .eq("id", ticket.id)
-      .select("*")
-      .single();
-    if (error || !data) fail(error, "Unable to assign the ticket.");
-    await this.logEvent(ticket.id, "Ticket assigned", user, `Assigned to ${provider.name}`);
-    const recipients = await providerUserIds(provider);
-    await notificationService.notify(recipients, {
-      ticket_id: ticket.id,
-      title: "New ticket assigned",
-      message: `Ticket ${ticket.ticket_no} has been assigned to you.`,
-      type: "ASSIGNED",
-    });
-    return data as HdTicket;
-  },
-
   async assignAndStart(ticket: HdTicket, provider: HdProvider): Promise<HdTicket> {
     const updated = await apiRequest<HdTicket>(
       `/helpdesk/tickets/${encodeURIComponent(ticket.id)}/assign-and-start`,
@@ -711,6 +794,89 @@ export const feedbackService = {
   },
   async list(): Promise<HdFeedback[]> {
     return apiRequest<HdFeedback[]>("/helpdesk/feedback");
+  },
+  async submitTicket(
+    ticketId: string,
+    input: { feedback: string; rating: number },
+  ): Promise<HdFeedback> {
+    return apiRequest<HdFeedback>(`/helpdesk/tickets/${encodeURIComponent(ticketId)}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId, ...input }),
+    });
+  },
+  async ticketOptions(buildingId: string): Promise<HdFeedbackTicketOption[]> {
+    return apiRequest<HdFeedbackTicketOption[]>(
+      `/helpdesk/tickets/feedback-options?building_id=${encodeURIComponent(buildingId)}`,
+    );
+  },
+};
+
+export const publicHelpdeskService = {
+  async bootstrap(buildingId: string): Promise<PublicHelpdeskBootstrap> {
+    return apiRequest<PublicHelpdeskBootstrap>(
+      `/public/helpdesk/${encodeURIComponent(buildingId)}/bootstrap`,
+      { auth: false },
+    );
+  },
+  async sendOtp(buildingId: string, email: string): Promise<void> {
+    await apiRequest(`/public/helpdesk/${encodeURIComponent(buildingId)}/otp`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+      auth: false,
+    });
+  },
+  async verifyOtp(buildingId: string, email: string, code: string): Promise<string> {
+    const result = await apiRequest<{ token: string }>(
+      `/public/helpdesk/${encodeURIComponent(buildingId)}/verify`,
+      { method: "POST", body: JSON.stringify({ email, code }), auth: false },
+    );
+    return result.token;
+  },
+  async tickets(buildingId: string, token: string): Promise<HdFeedbackTicketOption[]> {
+    return apiRequest<HdFeedbackTicketOption[]>(
+      `/public/helpdesk/${encodeURIComponent(buildingId)}/tickets?token=${encodeURIComponent(token)}`,
+      { auth: false },
+    );
+  },
+  async ticketHistory(
+    buildingId: string,
+    ticketId: string,
+    token: string,
+  ): Promise<HdPublicTicketHistory> {
+    return apiRequest<HdPublicTicketHistory>(
+      `/public/helpdesk/${encodeURIComponent(buildingId)}/tickets/${encodeURIComponent(ticketId)}/history?token=${encodeURIComponent(token)}`,
+      { auth: false },
+    );
+  },
+  async createTicket(
+    buildingId: string,
+    input: {
+      token: string;
+      name: string;
+      areaId: string;
+      categoryId: string;
+      subcategoryId?: string;
+      priority: HdTicket["priority"];
+      description: string;
+      latitude: number;
+      longitude: number;
+    },
+  ): Promise<HdTicket> {
+    return apiRequest<HdTicket>(`/public/helpdesk/${encodeURIComponent(buildingId)}/tickets`, {
+      method: "POST",
+      body: JSON.stringify(input),
+      auth: false,
+    });
+  },
+  async submitFeedback(
+    buildingId: string,
+    input: { token: string; name: string; ticketId: string; feedback: string; rating: number },
+  ): Promise<HdFeedback> {
+    return apiRequest<HdFeedback>(`/public/helpdesk/${encodeURIComponent(buildingId)}/feedback`, {
+      method: "POST",
+      body: JSON.stringify(input),
+      auth: false,
+    });
   },
 };
 

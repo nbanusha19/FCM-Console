@@ -4,13 +4,11 @@ import { useMemo } from "react";
 import {
   Activity,
   ArrowUpRight,
-  Ban,
   CalendarClock,
   CheckCircle2,
   Clock3,
   Plus,
   UsersRound,
-  XCircle,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -60,14 +58,9 @@ export function VmsDashboard() {
     .sort((a, b) => a.expected_arrival.localeCompare(b.expected_arrival));
   const inside = data.filter((visit) => visit.status === "CHECKED_IN");
   const pending = data.filter((visit) => visit.status === "PENDING");
-  const completed = data.filter(
-    (visit) => visit.status === "CHECKED_OUT" || visit.status === "COMPLETED",
-  );
   const upcoming = data.filter(
     (visit) => ["APPROVED", "CARD_ISSUED"].includes(visit.status) && visit.visit_date >= today,
   ).length;
-  const rejected = data.filter((visit) => visit.status === "REJECTED").length;
-  const cancelled = data.filter((visit) => visit.status === "CANCELLED").length;
   const nextVisit =
     todayVisits.find((visit) => visit.status === "CHECKED_IN") ??
     todayVisits[0] ??
@@ -113,11 +106,6 @@ export function VmsDashboard() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button asChild size="sm" variant="outline">
-            <Link to="/vms-upcoming">
-              <CalendarClock className="size-3.5" /> Upcoming
-            </Link>
-          </Button>
           {canCreateVisitRequest(user) ? (
             <Button asChild size="sm">
               <Link to="/visitors" search={{ newRequest: true }}>
@@ -156,27 +144,6 @@ export function VmsDashboard() {
           caption="Approved today and future visits"
           icon={CalendarClock}
           tone="blue"
-        />
-        <SummaryStat
-          label="Completed visits"
-          value={completed.length}
-          caption="Checked out"
-          icon={CheckCircle2}
-          tone="blue"
-        />
-        <SummaryStat
-          label="Rejected visits"
-          value={rejected}
-          caption="Requests declined"
-          icon={XCircle}
-          tone="amber"
-        />
-        <SummaryStat
-          label="Cancelled visits"
-          value={cancelled}
-          caption="Requests cancelled"
-          icon={Ban}
-          tone="amber"
         />
       </section>
 

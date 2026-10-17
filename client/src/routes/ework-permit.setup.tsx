@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
+import { usePaged } from "@/components/common/TableCard";
 import { Pill } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +49,8 @@ function Setup() {
   const [l, setL] = useState({ building: "", floor: "", area: "" });
   const [vendorDialogOpen, setVendorDialogOpen] = useState(false);
   const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const pagedVendors = usePaged(vendors);
+  const pagedLocations = usePaged(locs);
   const refresh = () =>
     ["ewp-vendors-all", "ewp-vendors", "ewp-locations-all", "ewp-locations"].forEach((k) =>
       qc.invalidateQueries({ queryKey: [k] }),
@@ -98,7 +101,7 @@ function Setup() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {vendors.map((x) => (
+              {pagedVendors.rows.map((x) => (
                 <TableRow key={x.id}>
                   <TableCell className="font-medium">{x.name}</TableCell>
                   <TableCell>{x.contact}</TableCell>
@@ -123,6 +126,7 @@ function Setup() {
               ))}
             </TableBody>
           </Table>
+          {pagedVendors.footer}
         </div>
       </section>
       <section className="space-y-3">
@@ -144,7 +148,7 @@ function Setup() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {locs.map((x) => (
+              {pagedLocations.rows.map((x) => (
                 <TableRow key={x.id}>
                   <TableCell className="font-medium">{x.building}</TableCell>
                   <TableCell>{x.floor}</TableCell>
@@ -171,6 +175,7 @@ function Setup() {
               ))}
             </TableBody>
           </Table>
+          {pagedLocations.footer}
         </div>
       </section>
 

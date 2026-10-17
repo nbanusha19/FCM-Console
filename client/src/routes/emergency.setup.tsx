@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/common/PageHeader";
+import { usePaged } from "@/components/common/TableCard";
 import { Pill } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,6 +51,8 @@ function Setup() {
   const [assemblyDialogOpen, setAssemblyDialogOpen] = useState(false);
   const [typeDialogOpen, setTypeDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const pagedPoints = usePaged(points);
+  const pagedTypes = usePaged(types);
 
   if (!canManage)
     return <p className="text-muted-foreground">Only HSE Admin can manage emergency settings.</p>;
@@ -129,7 +132,7 @@ function Setup() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {points.map((x) => (
+                {pagedPoints.rows.map((x) => (
                   <TableRow key={x.id}>
                     <TableCell className="font-medium">{x.name}</TableCell>
                     <TableCell>{x.location}</TableCell>
@@ -157,6 +160,7 @@ function Setup() {
               </TableBody>
             </Table>
           </div>
+          {pagedPoints.footer}
         </section>
       </div>
 
@@ -178,7 +182,7 @@ function Setup() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {types.map((x) => (
+                {pagedTypes.rows.map((x) => (
                   <TableRow key={x.id}>
                     <TableCell className="font-medium">{x.name}</TableCell>
                     <TableCell>{active(x.active)}</TableCell>
@@ -204,6 +208,7 @@ function Setup() {
               </TableBody>
             </Table>
           </div>
+          {pagedTypes.footer}
         </section>
       </div>
 

@@ -56,8 +56,18 @@ export function ensureProductDefaults() {
     const roles = getList<RoleMaster>(KEYS.roles);
     if (!roles.some((role) => role.key === "FIRE_WARDEN")) saveData(KEYS.roles, [...roles, DEFAULT_ROLES[5]!]);
   }
-  if (!getList<VisitorTypeMaster>(KEYS.visitorTypes).length) {
-    saveData(KEYS.visitorTypes, DEFAULT_VISITOR_TYPES);
+  const visitorTypes = getList<VisitorTypeMaster>(KEYS.visitorTypes);
+  const visitorTypeKeys = new Set(visitorTypes.map((visitorType) => visitorType.key));
+  const missingVisitorTypes = DEFAULT_VISITOR_TYPES.filter(
+    (visitorType) => !visitorTypeKeys.has(visitorType.key),
+  ).map((visitorType) => ({
+    ...visitorType,
+    id: visitorTypes.some((existing) => existing.id === visitorType.id)
+      ? `${visitorType.id}-${visitorType.key}`
+      : visitorType.id,
+  }));
+  if (missingVisitorTypes.length) {
+    saveData(KEYS.visitorTypes, [...visitorTypes, ...missingVisitorTypes]);
   }
 }
 

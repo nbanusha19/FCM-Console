@@ -1,6 +1,12 @@
 import { cn } from "@/lib/utils";
 
-export function AppIcon({ className }: { className?: string }) {
+export function AppIcon({
+  className,
+  initial = "F",
+}: {
+  className?: string;
+  initial?: string;
+}) {
   return (
     <span
       aria-hidden="true"
@@ -9,7 +15,7 @@ export function AppIcon({ className }: { className?: string }) {
         className,
       )}
     >
-      V
+      {initial}
     </span>
   );
 }

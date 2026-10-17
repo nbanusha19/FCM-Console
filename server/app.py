@@ -20,14 +20,16 @@ from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.responses import FileResponse, HTMLResponse
 
 from config import settings
 from database import cursor, rows_as_dicts
+from email_templates import branded_email_html, otp_email_html
 from security import create_access_token, current_user, hash_password, verify_password
 
 logging.basicConfig(level=logging.INFO)
@@ -108,6 +110,40 @@ class HelpdeskFeedbackRequest(BaseModel):
     rating: int = Field(ge=1, le=5)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
+
+
+class HelpdeskTicketFeedbackRequest(BaseModel):
+    ticket_id: str = Field(alias="ticketId", min_length=1, max_length=100)
+    feedback: str = Field(min_length=3, max_length=2000)
+    rating: int = Field(ge=1, le=5)
+
+
+class PublicHelpdeskOtpRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class PublicHelpdeskOtpVerifyRequest(PublicHelpdeskOtpRequest):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class PublicHelpdeskTicketRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=4096)
+    name: str = Field(min_length=1, max_length=200)
+    area_id: str = Field(alias="areaId", min_length=1, max_length=100)
+    category_id: str = Field(alias="categoryId", min_length=1, max_length=100)
+    subcategory_id: str | None = Field(default=None, alias="subcategoryId", max_length=100)
+    priority: str = "MEDIUM"
+    description: str = Field(min_length=10, max_length=4000)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
+class PublicHelpdeskFeedbackRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=4096)
+    ticket_id: str = Field(alias="ticketId", min_length=1, max_length=100)
+    name: str = Field(default="", max_length=200)
+    feedback: str = Field(min_length=3, max_length=2000)
+    rating: int = Field(ge=1, le=5)
 
 
 class EmergencyEmailResponseRequest(BaseModel):
@@ -512,6 +548,37 @@ def _prepare_visit_insert(row_data: dict[str, Any]) -> dict[str, Any]:
     return prepared
 
 
+def _validate_visit_schedule(row_data: dict[str, Any], now: datetime | None = None) -> None:
+    visit_date_value = row_data.get("visit_date")
+    arrival_value = row_data.get("expected_arrival")
+    if not visit_date_value or not arrival_value:
+        return
+    try:
+        visit_date = (
+            visit_date_value.date()
+            if isinstance(visit_date_value, datetime)
+            else date.fromisoformat(str(visit_date_value)[:10])
+        )
+        arrival = (
+            arrival_value
+            if isinstance(arrival_value, time)
+            else time.fromisoformat(str(arrival_value))
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Enter a valid visit date and start time.") from exc
+
+    current = now or datetime.now(ZoneInfo("Asia/Kolkata"))
+    if current.tzinfo is not None:
+        current = current.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    if visit_date < current.date():
+        raise HTTPException(status_code=400, detail="Visit date cannot be in the past.")
+    if visit_date == current.date() and arrival <= current.time().replace(second=0, microsecond=0):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid time. Please select a proper time schedule.",
+        )
+
+
 def _apply_internal_visitor(cur: Any, row_data: dict[str, Any]) -> None:
     if row_data.get("visitor_type") != "EMPLOYEE":
         row_data.pop("visitor_employee_id", None)
@@ -649,13 +716,13 @@ def _send_visitor_invitation(visit: dict[str, Any], token: str) -> str:
             f"Visitor ID: {visitor_code}",
             "",
             f"Open your secure visitor pass and check in: {url}",
-            "This printable QR pass is your guest card. Return the printed pass to Security manually before checking out.",
         ]
     )
-    html_body = (
+    html_body = branded_email_html(
+        "Visitor Management",
+        "Your visit is approved",
         f"<p>Dear {safe(visitor_name)},</p>"
-        "<p>Your visit request has been approved. Present this QR at the entrance "
-        "and use the secure pass to check in.</p>"
+        "<p>Your visit request has been approved.</p>"
         f"<p><strong>Date:</strong> {safe(visit_date)}<br>"
         f"<strong>Time:</strong> {safe(arrival)} - {safe(departure)}<br>"
         f"<strong>Location:</strong> {safe(location)}<br>"
@@ -666,9 +733,9 @@ def _send_visitor_invitation(visit: dict[str, Any], token: str) -> str:
         f'<p><a href="{safe(url)}" style="display:inline-block;padding:12px 20px;'
         'background-color:#155eef;color:#ffffff;text-decoration:none;'
         'font-weight:bold;border-radius:6px">Check in now</a></p>'
-        '<p>This printable QR pass is your guest card. Return the printed pass to Security manually before checking out.</p>'
         '<p><img src="cid:visitor-qr" alt="Visitor check-in QR code" '
-        'width="220" height="220"></p>'
+        'width="220" height="220"></p>',
+        preheader=f"Your visit to {location} has been approved.",
     )
     message = EmailMessage()
     message["Subject"] = f"Your visit is approved - {visit_date}"
@@ -838,22 +905,29 @@ def _send_emergency_response_email(recipient: dict[str, Any], incident: dict[str
         )
     )
     message.add_alternative(
-        f"<p>Hello {safe(name)},</p>"
-        f"<p><strong>Emergency:</strong> {safe(title)}<br>"
-        f"<strong>Location:</strong> {safe(location)}<br>"
-        f"<strong>Proceed to:</strong> {safe(assembly)}</p>"
-        "<p><strong>Evacuate immediately using the nearest safe route. Do not use elevators.</strong></p>"
-        "<p>Choose one response below. You will be asked to confirm it before it is recorded.</p>"
-        f'<p><a href="{safe(safe_response_url)}" '
-        'style="display:inline-block;margin-right:8px;padding:12px 18px;'
-        'background:#15803d;color:#ffffff;text-decoration:none;font-weight:bold;'
-        'border-radius:6px">I AM SAFE</a>'
-        f'<a href="{safe(support_response_url)}" '
-        'style="display:inline-block;padding:12px 18px;background:#b91c1c;'
-        'color:#ffffff;text-decoration:none;font-weight:bold;border-radius:6px">'
-        "I NEED SUPPORT</a></p>"
-        "<p>Your response will be recorded against your account.</p>"
-        f'<p><a href="{safe(response_url)}">Open emergency response</a></p>',
+        branded_email_html(
+            "Emergency Evacuation",
+            title,
+            f"<p>Hello {safe(name)},</p>"
+            f"<p><strong>Emergency:</strong> {safe(title)}<br>"
+            f"<strong>Location:</strong> {safe(location)}<br>"
+            f"<strong>Proceed to:</strong> {safe(assembly)}</p>"
+            "<p><strong>Evacuate immediately using the nearest safe route. Do not use elevators.</strong></p>"
+            "<p>Choose one response below. You will be asked to confirm it before it is recorded.</p>"
+            f'<p><a href="{safe(safe_response_url)}" '
+            'style="display:inline-block;margin-right:8px;padding:12px 18px;'
+            'background:#15803d;color:#ffffff;text-decoration:none;font-weight:bold;'
+            'border-radius:6px">I AM SAFE</a>'
+            f'<a href="{safe(support_response_url)}" '
+            'style="display:inline-block;padding:12px 18px;background:#b91c1c;'
+            'color:#ffffff;text-decoration:none;font-weight:bold;border-radius:6px">'
+            "I NEED SUPPORT</a></p>"
+            "<p>Your response will be recorded against your account.</p>"
+            f'<p><a href="{safe(response_url)}" style="color:#155eef;font-weight:bold">'
+            "Open emergency response</a></p>",
+            preheader=f"Urgent: {title}. Evacuate and record your response.",
+            accent="#b42318",
+        ),
         subtype="html",
     )
     if settings.smtp_use_ssl:
@@ -910,16 +984,27 @@ def _send_helpdesk_ticket_email(
         body += f"\nOpen ticket: {ticket_url}\n"
     message.set_content(body)
     message.add_alternative(
-        "<p>A new Helpdesk ticket has been created.</p>"
-        f"<p><strong>Ticket:</strong> {safe(ticket_no)}<br>"
-        f"<strong>Category:</strong> {safe(ticket.get('category_name'))}<br>"
-        f"<strong>Sub-category:</strong> {safe(ticket.get('subcategory_name') or 'General')}<br>"
-        f"<strong>Service:</strong> {safe(ticket.get('service_name'))}<br>"
-        f"<strong>Location:</strong> {safe(ticket.get('location'))}<br>"
-        f"<strong>Priority:</strong> {safe(ticket.get('priority'))}<br>"
-        f"<strong>Raised by:</strong> {safe(ticket.get('raiser_name'))}</p>"
-        f"<p>{safe(ticket.get('description'))}</p>"
-        + (f'<p><a href="{safe(ticket_url)}">Open ticket</a></p>' if ticket_url else ""),
+        branded_email_html(
+            "Helpdesk",
+            f"New ticket {ticket_no}",
+            "<p>A new Helpdesk ticket has been created.</p>"
+            f"<p><strong>Ticket:</strong> {safe(ticket_no)}<br>"
+            f"<strong>Category:</strong> {safe(ticket.get('category_name'))}<br>"
+            f"<strong>Sub-category:</strong> {safe(ticket.get('subcategory_name') or 'General')}<br>"
+            f"<strong>Service:</strong> {safe(ticket.get('service_name'))}<br>"
+            f"<strong>Location:</strong> {safe(ticket.get('location'))}<br>"
+            f"<strong>Priority:</strong> {safe(ticket.get('priority'))}<br>"
+            f"<strong>Raised by:</strong> {safe(ticket.get('raiser_name'))}</p>"
+            f"<p>{safe(ticket.get('description'))}</p>"
+            + (
+                f'<p><a href="{safe(ticket_url)}" style="display:inline-block;padding:12px 20px;'
+                'background-color:#155eef;color:#ffffff;text-decoration:none;font-weight:bold;'
+                f'border-radius:6px">Open ticket</a></p>'
+                if ticket_url
+                else ""
+            ),
+            preheader=f"New Helpdesk ticket {ticket_no} requires attention.",
+        ),
         subtype="html",
     )
     try:
@@ -940,6 +1025,126 @@ def _send_helpdesk_ticket_email(
             smtp.send_message(message)
     except (OSError, smtplib.SMTPException) as exc:
         raise RuntimeError("The SMTP server could not accept the Helpdesk ticket email.") from exc
+
+
+def _send_helpdesk_closed_ticket_emails(
+    recipients: list[dict[str, Any]], ticket: dict[str, Any]
+) -> None:
+    if not settings.smtp_host or not settings.smtp_from_email:
+        logger.error(
+            "Helpdesk closure email is not configured for ticket %s",
+            ticket.get("ticket_no") or ticket.get("id"),
+        )
+        return
+    if settings.smtp_use_tls and settings.smtp_use_ssl:
+        logger.error("Configure either SMTP_USE_TLS or SMTP_USE_SSL, not both.")
+        return
+    if bool(settings.smtp_username) != bool(settings.smtp_password):
+        logger.error("Set both SMTP_USERNAME and SMTP_PASSWORD, or leave both empty.")
+        return
+
+    ticket_no = str(ticket.get("ticket_no") or ticket.get("id") or "Helpdesk ticket")
+    app_ticket_url = None
+    if settings.public_app_url:
+        app_ticket_url = urllib.parse.urljoin(
+            settings.public_app_url.rstrip("/") + "/",
+            f"hd-ticket/{urllib.parse.quote(str(ticket.get('id') or ''), safe='')}",
+        )
+    feedback_url = None
+    if settings.public_app_url and ticket.get("building_id"):
+        feedback_url = urllib.parse.urljoin(
+            settings.public_app_url.rstrip("/") + "/",
+            "hd-raise?"
+            + urllib.parse.urlencode({"building": str(ticket["building_id"])}),
+        )
+
+    safe = lambda value: html.escape(str(value or ""), quote=True)
+    unique_recipients: dict[str, dict[str, Any]] = {}
+    for recipient in recipients:
+        email = str(recipient.get("Email") or "").strip()
+        if email:
+            key = email.casefold()
+            if key not in unique_recipients:
+                unique_recipients[key] = {**recipient, "Email": email}
+            elif recipient.get("PublicRequester"):
+                unique_recipients[key]["PublicRequester"] = True
+
+    for recipient in unique_recipients.values():
+        ticket_url = app_ticket_url
+        if recipient.get("PublicRequester"):
+            ticket_url = None
+            if settings.public_app_url and ticket.get("building_id") and ticket.get("id"):
+                ticket_url = urllib.parse.urljoin(
+                    settings.public_app_url.rstrip("/") + "/",
+                    "hd-raise?"
+                    + urllib.parse.urlencode(
+                        {
+                            "building": str(ticket["building_id"]),
+                            "ticket": str(ticket["id"]),
+                        }
+                    ),
+                )
+        message = EmailMessage()
+        message["Subject"] = f"Helpdesk ticket closed — {ticket_no}"
+        message["From"] = settings.smtp_from_email
+        message["To"] = recipient["Email"]
+        body = (
+            f"Hello {recipient.get('Name') or 'there'},\n\n"
+            f"Helpdesk ticket {ticket_no} has been resolved and closed.\n"
+            f"We'd love to hear your feedback about the work.\n"
+        )
+        if ticket_url:
+            body += f"\nView ticket: {ticket_url}\n"
+        if feedback_url:
+            body += f"Share feedback: {feedback_url}\n"
+        message.set_content(body)
+        message.add_alternative(
+            branded_email_html(
+                "Helpdesk",
+                f"Ticket {ticket_no} closed",
+                f"<p>Hello {safe(recipient.get('Name') or 'there')},</p>"
+                f"<p>Helpdesk ticket <strong>{safe(ticket_no)}</strong> has been resolved and closed.</p>"
+                "<p>We'd love to hear your feedback about the work.</p>"
+                + (
+                    f'<p><a href="{safe(ticket_url)}" style="display:inline-block;padding:12px 20px;'
+                    'background-color:#155eef;color:#ffffff;text-decoration:none;font-weight:bold;'
+                    f'border-radius:6px">View ticket</a></p>'
+                    if ticket_url
+                    else ""
+                )
+                + (
+                    f'<p><a href="{safe(feedback_url)}" style="display:inline-block;padding:12px 20px;'
+                    'background-color:#e8f0ff;color:#155eef;text-decoration:none;font-weight:bold;'
+                    f'border-radius:6px">Share your feedback</a></p>'
+                    if feedback_url
+                    else ""
+                ),
+                preheader=f"Helpdesk ticket {ticket_no} has been resolved and closed.",
+            ),
+            subtype="html",
+        )
+        try:
+            if settings.smtp_use_ssl:
+                smtp = smtplib.SMTP_SSL(
+                    settings.smtp_host,
+                    settings.smtp_port,
+                    timeout=15,
+                    context=ssl.create_default_context(),
+                )
+            else:
+                smtp = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15)
+            with smtp:
+                if settings.smtp_use_tls:
+                    smtp.starttls(context=ssl.create_default_context())
+                if settings.smtp_username:
+                    smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.send_message(message)
+        except (OSError, smtplib.SMTPException, RuntimeError):
+            logger.exception(
+                "Helpdesk closure email delivery failed for ticket %s and recipient %s",
+                ticket_no,
+                recipient["Email"],
+            )
 
 
 def _prepare_branch_manager_visit(
@@ -1070,15 +1275,24 @@ def _send_branch_manager_visit_request_email(
         "Links expire in 48 hours. You will be asked to confirm the decision."
     )
     message.add_alternative(
-        "<p>A visitor request requires your approval.</p>"
-        f"<p><strong>Visitor:</strong> {safe(visitor_name)}<br>"
-        f"<strong>Location:</strong> {safe(visit.get('location'))}<br>"
-        f"<strong>Date:</strong> {safe(visit_date)}<br>"
-        f"<strong>Host:</strong> {safe(host_name)}<br>"
-        f"<strong>Purpose:</strong> {safe(visit.get('purpose'))}</p>"
-        f'<p><a href="{safe(approve_url)}">Approve request</a></p>'
-        f'<p><a href="{safe(reject_url)}">Reject request</a></p>'
-        "<p>Links expire in 48 hours. The decision is recorded only after you confirm it.</p>",
+        branded_email_html(
+            "Visitor Management",
+            "Visitor approval required",
+            "<p>A visitor request requires your approval.</p>"
+            f"<p><strong>Visitor:</strong> {safe(visitor_name)}<br>"
+            f"<strong>Location:</strong> {safe(visit.get('location'))}<br>"
+            f"<strong>Date:</strong> {safe(visit_date)}<br>"
+            f"<strong>Host:</strong> {safe(host_name)}<br>"
+            f"<strong>Purpose:</strong> {safe(visit.get('purpose'))}</p>"
+            f'<p><a href="{safe(approve_url)}" style="display:inline-block;margin-right:8px;'
+            'padding:12px 20px;background-color:#155eef;color:#ffffff;text-decoration:none;'
+            'font-weight:bold;border-radius:6px">Approve request</a></p>'
+            f'<p><a href="{safe(reject_url)}" style="display:inline-block;padding:12px 20px;'
+            'background-color:#b42318;color:#ffffff;text-decoration:none;font-weight:bold;'
+            'border-radius:6px">Reject request</a></p>'
+            "<p>Links expire in 48 hours. The decision is recorded only after you confirm it.</p>",
+            preheader=f"Approval required for visitor {visitor_name}.",
+        ),
         subtype="html",
     )
     try:
@@ -1099,6 +1313,130 @@ def _send_branch_manager_visit_request_email(
             smtp.send_message(message)
     except (OSError, smtplib.SMTPException) as exc:
         raise RuntimeError("The SMTP server could not accept the visitor approval email.") from exc
+
+
+def _send_branch_manager_visit_approved_email(
+    recipient: dict[str, Any], visit: dict[str, Any]
+) -> None:
+    if not settings.smtp_host or not settings.smtp_from_email:
+        raise RuntimeError("Visitor schedule email is not configured. Set SMTP_HOST and SMTP_FROM_EMAIL.")
+    if settings.smtp_use_tls and settings.smtp_use_ssl:
+        raise RuntimeError("Configure either SMTP_USE_TLS or SMTP_USE_SSL, not both.")
+    if bool(settings.smtp_username) != bool(settings.smtp_password):
+        raise RuntimeError("Set both SMTP_USERNAME and SMTP_PASSWORD, or leave both empty.")
+
+    visitor_name = str(visit.get("name") or visit.get("visitor_name") or "Visitor")
+    visit_date = visit.get("visitDate") or visit.get("visit_date") or ""
+    arrival = visit.get("expectedArrival") or visit.get("expected_arrival") or ""
+    departure = visit.get("expectedDeparture") or visit.get("expected_departure") or ""
+    location = visit.get("location") or ""
+    host = visit.get("hostName") or visit.get("host_name") or ""
+    purpose = visit.get("purpose") or ""
+    request_no = visit.get("requestId") or visit.get("request_no") or ""
+    visitor_code = visit.get("visitorId") or visit.get("visitor_code") or ""
+    safe = lambda value: html.escape(str(value or ""), quote=True)
+    message = EmailMessage()
+    message["Subject"] = f"Visitor scheduled to visit {location} — {visitor_name}"
+    message["From"] = settings.smtp_from_email
+    message["To"] = str(recipient["Email"])
+    message.set_content(
+        f"This visitor is scheduled to visit your branch.\n\n"
+        f"Visitor: {visitor_name}\n"
+        f"Date: {visit_date}\n"
+        f"Time: {arrival} - {departure}\n"
+        f"Location: {location}\n"
+        f"Host: {host}\n"
+        f"Purpose: {purpose}\n"
+        f"Request: {request_no}\n"
+        f"Visitor ID: {visitor_code}\n"
+    )
+    message.add_alternative(
+        branded_email_html(
+            "Visitor Management",
+            "Visitor scheduled",
+            "<p>This visitor is scheduled to visit your branch.</p>"
+            f"<p><strong>Visitor:</strong> {safe(visitor_name)}<br>"
+            f"<strong>Date:</strong> {safe(visit_date)}<br>"
+            f"<strong>Time:</strong> {safe(arrival)} - {safe(departure)}<br>"
+            f"<strong>Location:</strong> {safe(location)}<br>"
+            f"<strong>Host:</strong> {safe(host)}<br>"
+            f"<strong>Purpose:</strong> {safe(purpose)}<br>"
+            f"<strong>Request:</strong> {safe(request_no)}<br>"
+            f"<strong>Visitor ID:</strong> {safe(visitor_code)}</p>",
+            preheader=f"{visitor_name} is scheduled to visit {location} on {visit_date}.",
+        ),
+        subtype="html",
+    )
+    try:
+        if settings.smtp_use_ssl:
+            smtp = smtplib.SMTP_SSL(
+                settings.smtp_host,
+                settings.smtp_port,
+                timeout=15,
+                context=ssl.create_default_context(),
+            )
+        else:
+            smtp = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15)
+        with smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls(context=ssl.create_default_context())
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise RuntimeError("The SMTP server could not accept the visitor schedule email.") from exc
+
+
+def _notify_branch_managers_of_approved_visit(
+    cur: Any, visit: dict[str, Any]
+) -> str:
+    location = str(visit.get("location") or "").strip()
+    if not location and visit.get("id"):
+        cur.execute(
+            "SELECT [Location] FROM [dbo].[Visits] WHERE [Id] = ?",
+            visit["id"],
+        )
+        row = cur.fetchone()
+        location = str(row[0] or "").strip() if row else ""
+    scheduled_visit = {**visit, "location": location}
+    cur.execute(
+        """
+        SELECT manager.[Id], manager.[Email], manager.[Name]
+        FROM [dbo].[AppUsers] AS manager
+        JOIN [dbo].[Branches] AS branch
+          ON branch.[Id] = manager.[BranchId]
+        WHERE manager.[Role] = 'BRANCH_MANAGER'
+          AND manager.[IsActive] = 1
+          AND NULLIF(LTRIM(RTRIM(manager.[Email])), '') IS NOT NULL
+          AND (branch.[Name] = ? OR branch.[Address] = ?)
+        ORDER BY manager.[Id]
+        """,
+        location,
+        location,
+    )
+    managers = rows_as_dicts(cur)
+    if not managers:
+        logger.warning(
+            "Approved visit %s has no active Branch Manager with an email for location %s",
+            visit.get("id") or visit.get("requestId") or "unknown",
+            location,
+        )
+        return "NO_RECIPIENT"
+
+    failures = 0
+    for manager in managers:
+        try:
+            _send_branch_manager_visit_approved_email(manager, scheduled_visit)
+        except Exception:
+            failures += 1
+            logger.exception(
+                "Branch Manager schedule email delivery failed for visit %s and manager %s",
+                visit.get("id") or visit.get("requestId") or "unknown",
+                manager.get("Id"),
+            )
+    if failures == len(managers):
+        return "FAILED"
+    return "PARTIAL" if failures else "SENT"
 
 
 def _from_sql_value(logical: str, key: str, value: Any) -> Any:
@@ -1196,6 +1534,11 @@ def _normalize(logical: str, row: dict[str, Any], module: str | None) -> dict[st
             except json.JSONDecodeError:
                 logger.exception("Invalid JSON stored in dbo.WorkPermits.FormData")
                 raise HTTPException(status_code=500, detail="A work permit contains invalid saved form data.")
+            continue
+        if logical == "emergencies" and column == "TriggeredAt":
+            timestamp = _json_value(value)
+            result["triggered_at"] = timestamp
+            result["created_at"] = timestamp
             continue
         result[key] = _json_value(value)
     if logical == "emg_incident_employees":
@@ -1657,6 +2000,17 @@ def _send_visitor_checkin_otp_email(email: str, code: str, visit: dict[str, Any]
         "Enter it on the visitor check-in page to complete check-in.\n\n"
         "If you did not request this code, you can ignore this email."
     )
+    message.add_alternative(
+        otp_email_html(
+            "Visitor Management",
+            "Verify your visitor check-in",
+            f"Hello {visitor_name}, your check-in verification code is:",
+            code,
+            "This code expires in 10 minutes and can be used once. Enter it on the visitor check-in page. If you did not request it, you can ignore this email.",
+            preheader="Your visitor check-in verification code.",
+        ),
+        subtype="html",
+    )
     try:
         if settings.smtp_use_ssl:
             smtp = smtplib.SMTP_SSL(
@@ -1820,6 +2174,14 @@ def _require_helpdesk_building_context(
         )
         if not area:
             raise HTTPException(status_code=400, detail="Choose an active area in this building.")
+        configured_floors = [
+            floor
+            for floor in _read_virtual(cur, "hd_building_floors")
+            if str(floor.get("name") or "").strip().casefold()
+            == str(area.get("floor") or "").strip().casefold()
+        ]
+        if configured_floors and not any(floor.get("active", True) for floor in configured_floors):
+            raise HTTPException(status_code=400, detail="Choose an area on an active floor.")
     return building, area, str(branch[0] or "")
 
 
@@ -1840,6 +2202,99 @@ def _require_helpdesk_branch_access(
         )
 
 
+def _public_helpdesk_otp_hash(building_id: str, email: str, code: str) -> str:
+    if not settings.jwt_secret or len(settings.jwt_secret) < 32:
+        raise HTTPException(status_code=503, detail="Helpdesk email verification is not configured.")
+    payload = f"helpdesk-qr-otp:{building_id}:{email.casefold()}:{code}"
+    return hmac.new(settings.jwt_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _public_helpdesk_token(building_id: str, email: str) -> str:
+    if not settings.jwt_secret or len(settings.jwt_secret) < 32:
+        raise HTTPException(status_code=503, detail="Helpdesk email verification is not configured.")
+    payload = {
+        "building_id": building_id,
+        "email": email.casefold(),
+        "exp": int(datetime.now(timezone.utc).timestamp()) + 7200,
+        "nonce": secrets.token_urlsafe(16),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    signature = hmac.new(settings.jwt_secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _verify_public_helpdesk_token(token: str, building_id: str) -> dict[str, str]:
+    try:
+        if not settings.jwt_secret or len(settings.jwt_secret) < 32:
+            raise ValueError("Helpdesk guest tokens are not configured.")
+        encoded, signature = token.split(".", 1)
+        expected = hmac.new(
+            settings.jwt_secret.encode(), encoded.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("Invalid signature.")
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        )
+        if int(payload["exp"]) < int(datetime.now(timezone.utc).timestamp()):
+            raise ValueError("Expired token.")
+        if str(payload["building_id"]) != building_id:
+            raise ValueError("Token is for a different building.")
+        email = str(payload["email"]).strip().casefold()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+            raise ValueError("Invalid email.")
+        return {"building_id": building_id, "email": email}
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=401, detail="Your Helpdesk verification has expired. Verify your email again."
+        ) from exc
+
+
+def _send_public_helpdesk_otp(email: str, code: str, building_name: str) -> None:
+    if not settings.smtp_host or not settings.smtp_from_email:
+        raise RuntimeError("Helpdesk email is not configured. Set SMTP_HOST and SMTP_FROM_EMAIL.")
+    if settings.smtp_use_tls and settings.smtp_use_ssl:
+        raise RuntimeError("Configure either SMTP_USE_TLS or SMTP_USE_SSL, not both.")
+    if bool(settings.smtp_username) != bool(settings.smtp_password):
+        raise RuntimeError("Set both SMTP_USERNAME and SMTP_PASSWORD, or leave both empty.")
+    message = EmailMessage()
+    message["Subject"] = "Your FCM Helpdesk verification code"
+    message["From"] = settings.smtp_from_email
+    message["To"] = email
+    message.set_content(
+        f"Your FCM Helpdesk verification code for {building_name} is {code}.\n\n"
+        "This code expires in 10 minutes. Do not share it with anyone."
+    )
+    message.add_alternative(
+        otp_email_html(
+            "Helpdesk",
+            "Verify your email",
+            f"Your verification code for {building_name} is:",
+            code,
+            "This code expires in 10 minutes. Do not share it with anyone.",
+            preheader=f"Your Helpdesk email verification code for {building_name}.",
+        ),
+        subtype="html",
+    )
+    if settings.smtp_use_ssl:
+        smtp = smtplib.SMTP_SSL(
+            settings.smtp_host,
+            settings.smtp_port,
+            timeout=15,
+            context=ssl.create_default_context(),
+        )
+    else:
+        smtp = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15)
+    with smtp:
+        if settings.smtp_use_tls:
+            smtp.starttls(context=ssl.create_default_context())
+        if settings.smtp_username:
+            smtp.login(settings.smtp_username, settings.smtp_password)
+        smtp.send_message(message)
+
+
 def _require_helpdesk_building_deletable(cur: Any, building_id: str) -> None:
     cur.execute(
         "SELECT TOP (1) [Id] FROM [dbo].[HelpdeskTickets] WHERE [BuildingId] = ?",
@@ -1858,6 +2313,760 @@ def _require_helpdesk_building_deletable(cur: Any, building_id: str) -> None:
             status_code=409,
             detail="This building has feedback history. Deactivate it instead to preserve records.",
         )
+
+
+def _active_helpdesk_building(cur: Any, building_id: str) -> dict[str, Any]:
+    building = next(
+        (
+            row for row in _read_virtual(cur, "hd_buildings")
+            if str(row.get("id") or "") == building_id and row.get("active", True)
+        ),
+        None,
+    )
+    if not building:
+        raise HTTPException(status_code=404, detail="This Helpdesk building is unavailable.")
+    return building
+
+
+def _public_helpdesk_requester(
+    cur: Any, email: str, submitted_name: str
+) -> tuple[str | None, str]:
+    cur.execute(
+        """
+        SELECT TOP (1) [Id], [Name]
+        FROM [dbo].[AppUsers]
+        WHERE [IsActive] = 1 AND LOWER(LTRIM(RTRIM([Email]))) = ?
+        """,
+        email,
+    )
+    requester = cur.fetchone()
+    requester_id = str(requester[0]) if requester and requester[0] else None
+    requester_name = (
+        str(requester[1])
+        if requester and requester[1]
+        else submitted_name.strip()
+    )
+    return requester_id, requester_name
+
+
+def _helpdesk_feedback_ticket_options(
+    cur: Any,
+    building_id: str,
+    submitter_email: str,
+    submitter_id: str | None = None,
+    only_closed: bool = True,
+) -> list[dict[str, Any]]:
+    feedback_rows = _read_virtual(cur, "hd_feedback")
+    submitted_ids = {
+        str(row.get("ticket_id"))
+        for row in feedback_rows
+        if row.get("feedback_type") == "TICKET"
+        and (
+            str(row.get("submitted_by_email") or "").strip().casefold()
+            == submitter_email.casefold()
+            or (
+                submitter_id is not None
+                and str(row.get("submitted_by") or "") == submitter_id
+            )
+        )
+    }
+    owner_filter = "LOWER(LTRIM(RTRIM([RaisedByEmail]))) = ?"
+    parameters: list[Any] = [building_id, submitter_email.casefold()]
+    if submitter_id is not None:
+        owner_filter = f"({owner_filter} OR [RaisedByUserId] = ?)"
+        parameters.append(submitter_id)
+    closed_filter = " AND [Status] = 'CLOSED'" if only_closed else ""
+    cur.execute(
+        f"""
+        SELECT [Id], [TicketNo], [Category], [Status], [Description], [CreatedAt]
+        FROM [dbo].[HelpdeskTickets]
+        WHERE [BuildingId] = ? AND {owner_filter}{closed_filter}
+        ORDER BY [CreatedAt] DESC
+        """,
+        *parameters,
+    )
+    return [
+        {
+            "id": str(row.get("Id") or ""),
+            "ticket_no": str(row.get("TicketNo") or ""),
+            "category_name": str(row.get("Category") or ""),
+            "description": str(row.get("Description") or ""),
+            "status": str(row.get("Status") or ""),
+            "created_at": str(_json_value(row.get("CreatedAt")) or ""),
+            "feedback_submitted": str(row.get("Id") or "") in submitted_ids,
+        }
+        for row in rows_as_dicts(cur)
+        if not only_closed or str(row.get("Status") or "").strip().upper() == "CLOSED"
+    ]
+
+
+def _helpdesk_branch_name(cur: Any, branch_id: str | None) -> str:
+    if not branch_id:
+        return ""
+    cur.execute("SELECT [Name] FROM [dbo].[Branches] WHERE [Id] = ?", branch_id)
+    row = cur.fetchone()
+    return str(row[0] or "") if row else ""
+
+
+def _enrich_helpdesk_feedback_display_fields(
+    cur: Any, feedback_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    result = [dict(row) for row in feedback_rows]
+    emails = {
+        str(row.get("submitted_by_email") or row.get("submitted_by") or "")
+        .strip()
+        .casefold()
+        for row in result
+        if (
+            not str(row.get("submitted_by_name") or "").strip()
+            or str(row.get("submitted_by_name") or "").strip().casefold()
+            == str(row.get("submitted_by_email") or row.get("submitted_by") or "").strip().casefold()
+        )
+        and "@" in str(row.get("submitted_by_email") or row.get("submitted_by") or "")
+    }
+    user_ids = {
+        str(row.get("submitted_by") or "")
+        for row in result
+        if not row.get("submitted_by_name")
+        and row.get("submitted_by")
+        and "@" not in str(row.get("submitted_by"))
+    }
+    names_by_email: dict[str, str] = {}
+    names_by_id: dict[str, str] = {}
+    for values, field, target in (
+        (sorted(emails), "Email", names_by_email),
+        (sorted(user_ids), "Id", names_by_id),
+    ):
+        for start in range(0, len(values), 900):
+            batch = values[start : start + 900]
+            if not batch:
+                continue
+            placeholders = ", ".join("?" for _ in batch)
+            comparison = (
+                "LOWER(LTRIM(RTRIM([Email])))"
+                if field == "Email"
+                else "CONVERT(nvarchar(100), [Id])"
+            )
+            cur.execute(
+                f"""
+                SELECT [Id], [Name], [Email]
+                FROM [dbo].[AppUsers]
+                WHERE [IsActive] = 1 AND {comparison} IN ({placeholders})
+                """,
+                *batch,
+            )
+            for user in rows_as_dicts(cur):
+                name = str(user.get("Name") or "").strip()
+                if name:
+                    key = (
+                        str(user.get(field) or "").strip().casefold()
+                        if field == "Email"
+                        else str(user.get(field) or "")
+                    )
+                    target[key] = name
+
+    branch_ids = sorted(
+        {
+            str(row.get("branch_id") or "")
+            for row in result
+            if row.get("branch_id") and not str(row.get("branch_name") or "").strip()
+        }
+    )
+    branches_by_id: dict[str, str] = {}
+    for start in range(0, len(branch_ids), 900):
+        batch = branch_ids[start : start + 900]
+        if not batch:
+            continue
+        placeholders = ", ".join("?" for _ in batch)
+        cur.execute(
+            f"SELECT [Id], [Name] FROM [dbo].[Branches] WHERE [Id] IN ({placeholders})",
+            *batch,
+        )
+        for branch in rows_as_dicts(cur):
+            name = str(branch.get("Name") or "").strip()
+            if name:
+                branches_by_id[str(branch.get("Id") or "")] = name
+
+    for row in result:
+        email = str(row.get("submitted_by_email") or row.get("submitted_by") or "").strip().casefold()
+        current_name = str(row.get("submitted_by_name") or "").strip()
+        if email and (not current_name or current_name.casefold() == email):
+            row["submitted_by_name"] = names_by_email.get(email, current_name or email)
+        elif not current_name:
+            submitter_id = str(row.get("submitted_by") or "")
+            row["submitted_by_name"] = names_by_id.get(submitter_id, email)
+        if not str(row.get("branch_name") or "").strip():
+            row["branch_name"] = branches_by_id.get(str(row.get("branch_id") or ""), "")
+    return result
+
+
+@app.get("/api/public/helpdesk/{building_id}/bootstrap")
+def public_helpdesk_bootstrap(building_id: str) -> dict[str, Any]:
+    try:
+        with cursor() as cur:
+            building = _active_helpdesk_building(cur, building_id)
+            public_building = {
+                key: value for key, value in building.items()
+                if key not in {"latitude", "longitude"}
+            }
+            return {
+                "building": public_building,
+                "floors": [
+                    row for row in _read_virtual(cur, "hd_building_floors")
+                    if row.get("active", True)
+                ],
+                "areas": [
+                    row for row in _read_virtual(cur, "hd_building_areas")
+                    if row.get("active", True)
+                    and str(row.get("building_id") or "") == building_id
+                ],
+                "categories": [
+                    row for row in _read_virtual(cur, "hd_categories")
+                    if row.get("active", True)
+                ],
+                "subcategories": [
+                    row for row in _read_virtual(cur, "hd_subcategories")
+                    if row.get("active", True)
+                ],
+                "services": [
+                    row for row in _read_virtual(cur, "hd_services")
+                    if row.get("active", True)
+                ],
+            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk catalog loading failed")
+        raise HTTPException(status_code=503, detail="Unable to load this building's Helpdesk catalog.") from exc
+
+
+@app.post("/api/public/helpdesk/{building_id}/otp")
+def send_public_helpdesk_otp(
+    building_id: str, body: PublicHelpdeskOtpRequest
+) -> dict[str, Any]:
+    email = body.email.strip().casefold()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    now = int(datetime.now(timezone.utc).timestamp())
+    challenge_id = f"{building_id}:{email}"
+    try:
+        with cursor() as cur:
+            building = _active_helpdesk_building(cur, building_id)
+            challenges = _read_virtual(cur, "hd_public_otp_challenges")
+            existing = next((item for item in challenges if item.get("id") == challenge_id), None)
+            if existing and now - int(existing.get("created_at", 0)) < 60:
+                raise HTTPException(status_code=429, detail="Wait 60 seconds before requesting another code.")
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            challenge = {
+                "id": challenge_id,
+                "code_hash": _public_helpdesk_otp_hash(building_id, email, code),
+                "created_at": now,
+                "expires_at": now + 600,
+                "attempts": 0,
+                "used": False,
+            }
+            challenges = [item for item in challenges if item.get("id") != challenge_id]
+            _write_virtual(cur, "hd_public_otp_challenges", ([challenge] + challenges)[:10000])
+            _send_public_helpdesk_otp(email, code, str(building.get("name") or "your building"))
+            return {"sent": True, "expiresInSeconds": 600, "resendAfterSeconds": 60}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk OTP delivery failed")
+        raise HTTPException(status_code=502, detail="Unable to send the verification code. Check email settings and try again.") from exc
+
+
+@app.post("/api/public/helpdesk/{building_id}/verify")
+def verify_public_helpdesk_otp(
+    building_id: str, body: PublicHelpdeskOtpVerifyRequest
+) -> dict[str, Any]:
+    email = body.email.strip().casefold()
+    challenge_id = f"{building_id}:{email}"
+    now = int(datetime.now(timezone.utc).timestamp())
+    invalid_code = False
+    try:
+        with cursor() as cur:
+            _active_helpdesk_building(cur, building_id)
+            challenges = _read_virtual(cur, "hd_public_otp_challenges")
+            challenge = next((item for item in challenges if item.get("id") == challenge_id), None)
+            if not challenge or challenge.get("used"):
+                raise HTTPException(status_code=409, detail="Request a new verification code.")
+            if now > int(challenge.get("expires_at", 0)):
+                raise HTTPException(status_code=400, detail="The verification code expired. Request a new one.")
+            if int(challenge.get("attempts", 0)) >= 5:
+                raise HTTPException(status_code=429, detail="Too many incorrect codes. Request a new one.")
+            code_hash = _public_helpdesk_otp_hash(building_id, email, body.code)
+            if not hmac.compare_digest(str(challenge.get("code_hash") or ""), code_hash):
+                challenge["attempts"] = int(challenge.get("attempts", 0)) + 1
+                _write_virtual(cur, "hd_public_otp_challenges", challenges)
+                invalid_code = True
+            else:
+                challenge["used"] = True
+                _write_virtual(cur, "hd_public_otp_challenges", challenges)
+                result = {"token": _public_helpdesk_token(building_id, email), "email": email}
+        if invalid_code:
+            raise HTTPException(status_code=400, detail="The verification code is incorrect.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk OTP verification failed")
+        raise HTTPException(status_code=503, detail="Unable to verify the code. Please try again.") from exc
+
+
+@app.get("/api/public/helpdesk/{building_id}/tickets")
+def list_public_helpdesk_tickets(
+    building_id: str, token: str = Query(..., min_length=32, max_length=4096)
+) -> list[dict[str, Any]]:
+    identity = _verify_public_helpdesk_token(token, building_id)
+    try:
+        with cursor() as cur:
+            _active_helpdesk_building(cur, building_id)
+            return _helpdesk_feedback_ticket_options(
+                cur, building_id, identity["email"], only_closed=False
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk ticket listing failed")
+        raise HTTPException(status_code=503, detail="Unable to load Helpdesk tickets.") from exc
+
+
+@app.get("/api/public/helpdesk/{building_id}/tickets/{ticket_id}/history")
+def get_public_helpdesk_ticket_history(
+    building_id: str,
+    ticket_id: str,
+    token: str = Query(..., min_length=32, max_length=4096),
+) -> dict[str, Any]:
+    identity = _verify_public_helpdesk_token(token, building_id)
+    try:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM [dbo].[HelpdeskTickets]
+                WHERE [Id] = ? AND [BuildingId] = ?
+                  AND LOWER(LTRIM(RTRIM([RaisedByEmail]))) = ?
+                """,
+                ticket_id,
+                building_id,
+                identity["email"],
+            )
+            rows = rows_as_dicts(cur)
+            if not rows:
+                raise HTTPException(status_code=404, detail="This Helpdesk ticket was not found.")
+            ticket = _normalize("hd_tickets", rows[0], None)
+            cur.execute(
+                """
+                SELECT [Action], [Note], [ActorName], [CreatedAt]
+                FROM [dbo].[ModuleEvents]
+                WHERE [ModuleName] = 'HELPDESK' AND [RecordId] = ?
+                ORDER BY [CreatedAt], [Id]
+                """,
+                ticket_id,
+            )
+            events = [
+                {
+                    "action": str(row.get("Action") or ""),
+                    "remarks": str(row.get("Note") or ""),
+                    "performed_by_name": str(row.get("ActorName") or ""),
+                    "created_at": str(_json_value(row.get("CreatedAt")) or ""),
+                }
+                for row in rows_as_dicts(cur)
+            ]
+            return {
+                "ticket": {
+                    "id": ticket_id,
+                    "ticket_no": str(ticket.get("ticket_no") or ""),
+                    "category_name": str(ticket.get("category_name") or ""),
+                    "subcategory_name": str(ticket.get("subcategory_name") or ""),
+                    "description": str(ticket.get("description") or ""),
+                    "location": str(ticket.get("location") or ""),
+                    "priority": str(ticket.get("priority") or ""),
+                    "status": str(ticket.get("status") or ""),
+                    "created_at": str(ticket.get("created_at") or ""),
+                    "updated_at": str(ticket.get("updated_at") or ""),
+                    "closed_at": str(ticket.get("closed_at") or ""),
+                },
+                "events": events,
+            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk ticket history failed")
+        raise HTTPException(status_code=503, detail="Unable to load ticket history.") from exc
+
+
+@app.get("/api/helpdesk/tickets/feedback-options")
+def list_helpdesk_feedback_ticket_options(
+    building_id: str = Query(..., min_length=1, max_length=200),
+    claims: dict[str, Any] = Depends(current_user),
+) -> list[dict[str, Any]]:
+    role = _current_role(claims)
+    if role not in {"ADMIN", "BRANCH_MANAGER", "EMPLOYEE"}:
+        raise HTTPException(status_code=403, detail="You do not have permission to view ticket feedback options.")
+    try:
+        with cursor() as cur:
+            building = _active_helpdesk_building(cur, building_id)
+            _require_helpdesk_branch_access(cur, str(building["branch_id"]), claims)
+            cur.execute(
+                "SELECT [Email] FROM [dbo].[AppUsers] WHERE [Id] = ? AND [IsActive] = 1",
+                claims["sub"],
+            )
+            user = cur.fetchone()
+            if not user or not str(user[0] or "").strip():
+                raise HTTPException(status_code=401, detail="A valid email is required for ticket feedback.")
+            return _helpdesk_feedback_ticket_options(
+                cur,
+                building_id,
+                str(user[0]).strip().casefold(),
+                str(claims["sub"]),
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Helpdesk feedback ticket options failed")
+        raise HTTPException(status_code=503, detail="Unable to load Helpdesk tickets.") from exc
+
+
+@app.post("/api/public/helpdesk/{building_id}/tickets")
+def create_public_helpdesk_ticket(
+    building_id: str, body: PublicHelpdeskTicketRequest
+) -> dict[str, Any]:
+    identity = _verify_public_helpdesk_token(body.token, building_id)
+    description = body.description.strip()
+    if len(description) < 10:
+        raise HTTPException(status_code=400, detail="Describe the issue in at least 10 characters.")
+    requester_name = body.name.strip()
+    if len(requester_name) < 2:
+        raise HTTPException(status_code=400, detail="Enter your name.")
+    priority = _helpdesk_priority(body.priority)
+    try:
+        with cursor() as cur:
+            building, area, branch_name = _require_helpdesk_building_context(
+                cur, building_id, body.area_id, body.latitude, body.longitude
+            )
+            if not area:
+                raise HTTPException(status_code=400, detail="Select an active area in this building.")
+            categories = _read_virtual(cur, "hd_categories")
+            category = next(
+                (item for item in categories if item.get("active", True) and str(item.get("id")) == body.category_id),
+                None,
+            )
+            if not category:
+                raise HTTPException(status_code=400, detail="Select an active service category.")
+            subcategory = None
+            if body.subcategory_id:
+                subcategory = next(
+                    (
+                        item for item in _read_virtual(cur, "hd_subcategories")
+                        if item.get("active", True)
+                        and str(item.get("id")) == body.subcategory_id
+                        and str(item.get("category_id")) == body.category_id
+                    ),
+                    None,
+                )
+                if not subcategory:
+                    raise HTTPException(status_code=400, detail="Select a valid sub-category.")
+            elif any(
+                item.get("active", True) and str(item.get("category_id")) == body.category_id
+                for item in _read_virtual(cur, "hd_subcategories")
+            ):
+                raise HTTPException(status_code=400, detail="Select a sub-category.")
+            services = _read_virtual(cur, "hd_services")
+            service = next(
+                (
+                    item for item in services
+                    if item.get("active", True)
+                    and str(item.get("category_id")) == body.category_id
+                    and (
+                        str(item.get("subcategory_id") or "") == str((subcategory or {}).get("id") or "")
+                        or (not subcategory and not item.get("subcategory_id"))
+                    )
+                ),
+                None,
+            )
+            providers = _read_virtual(cur, "hd_providers")
+            provider = next(
+                (item for item in providers if item.get("active", True) and item.get("id") == (service or {}).get("provider_id")),
+                None,
+            )
+            ticket_id = str(uuid.uuid4())
+            ticket_no = _next_helpdesk_ticket_no(cur)
+            requester_id, raiser_name = _public_helpdesk_requester(
+                cur, identity["email"], requester_name
+            )
+            location = " · ".join(
+                part for part in (branch_name, str(building.get("name") or ""), str(area.get("floor") or ""), str(area.get("name") or ""))
+                if part
+            )
+            cur.execute(
+                """
+                INSERT INTO [dbo].[HelpdeskTickets]
+                    ([Id], [TicketNo], [RaisedByUserId], [RaisedByName], [RaisedByEmail],
+                     [Category], [Subcategory], [ServiceName], [ProviderName], [Description],
+                     [Location], [Priority], [Status], [BranchId], [BuildingId], [BuildingAreaId],
+                     [FloorName], [AreaName], [CreatedAt], [UpdatedAt])
+                OUTPUT INSERTED.*
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', ?, ?, ?, ?, ?,
+                        SYSUTCDATETIME(), SYSUTCDATETIME())
+                """,
+                ticket_id, ticket_no, requester_id, raiser_name, identity["email"], category["name"],
+                (subcategory or {}).get("name") or "", (service or {}).get("name") or "",
+                (provider or {}).get("name") or "", description, location, priority,
+                building["branch_id"], building_id, area["id"], area["floor"], area["name"],
+            )
+            rows = rows_as_dicts(cur)
+            if not rows:
+                raise RuntimeError("The public Helpdesk ticket was not created.")
+            ticket = _normalize("hd_tickets", rows[0], None)
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO [dbo].[ModuleEvents]
+                        ([Id], [ModuleName], [RecordId], [Action], [Note],
+                         [ActorUserId], [ActorName], [CreatedAt])
+                    VALUES (NEWID(), 'HELPDESK', ?, 'Ticket created', ?, ?, ?, SYSUTCDATETIME())
+                    """,
+                    ticket_id,
+                    f"Ticket raised by {raiser_name}.",
+                    requester_id,
+                    raiser_name,
+                )
+            except Exception:
+                logger.exception(
+                    "Public Helpdesk ticket %s was created, but its activity event could not be stored",
+                    ticket_no,
+                )
+            _notify_public_helpdesk_ticket(cur, ticket)
+            return ticket
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk ticket creation failed")
+        raise HTTPException(status_code=503, detail="Unable to raise the ticket. Please try again.") from exc
+
+
+def _notify_public_helpdesk_ticket(cur: Any, ticket: dict[str, Any]) -> None:
+    cur.execute(
+        """
+        SELECT [Id], [Name], [Email], [Role]
+        FROM [dbo].[AppUsers]
+        WHERE [IsActive] = 1 AND [Role] IN ('SERVICE_PROVIDER', 'ADMIN')
+          AND (? IS NULL OR [Id] <> ?)
+        ORDER BY [Id]
+        """,
+        ticket.get("raiser_id"), ticket.get("raiser_id"),
+    )
+    recipients = rows_as_dicts(cur)
+    now = datetime.now(timezone.utc).isoformat()
+    if recipients:
+        notifications = _read_virtual(cur, "hd_notifications")
+        _write_virtual(
+            cur,
+            "hd_notifications",
+            (
+                [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "recipient_id": str(recipient["Id"]),
+                        "ticket_id": str(ticket["id"]),
+                        "title": "New Helpdesk ticket",
+                        "message": f"Ticket {ticket.get('ticket_no')} has been raised by {ticket.get('raiser_name') or 'a user'}.",
+                        "type": "NEW",
+                        "is_read": False,
+                        "created_at": now,
+                    }
+                    for recipient in recipients
+                ] + notifications
+            )[:10000],
+        )
+    for recipient in recipients:
+        if recipient.get("Role") != "SERVICE_PROVIDER" or not str(recipient.get("Email") or "").strip():
+            continue
+        try:
+            _send_helpdesk_ticket_email(recipient, ticket)
+        except Exception:
+            logger.exception(
+                "Public Helpdesk ticket email delivery failed for ticket %s and provider %s",
+                ticket.get("ticket_no"), recipient.get("Id"),
+            )
+
+
+@app.post("/api/public/helpdesk/{building_id}/feedback")
+def submit_public_helpdesk_ticket_feedback(
+    building_id: str, body: PublicHelpdeskFeedbackRequest
+) -> dict[str, Any]:
+    identity = _verify_public_helpdesk_token(body.token, building_id)
+    try:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM [dbo].[HelpdeskTickets]
+                WHERE [Id] = ? AND [BuildingId] = ?
+                """,
+                body.ticket_id, building_id,
+            )
+            tickets = rows_as_dicts(cur)
+            if not tickets:
+                raise HTTPException(status_code=404, detail="This Helpdesk ticket was not found.")
+            ticket = _normalize("hd_tickets", tickets[0], None)
+            if str(ticket.get("raiser_email") or "").strip().casefold() != identity["email"]:
+                raise HTTPException(status_code=404, detail="This Helpdesk ticket was not found.")
+            if str(ticket.get("status") or "").strip().upper() != "CLOSED":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Feedback can only be submitted for closed tickets.",
+                )
+            feedback_rows = _read_virtual(cur, "hd_feedback")
+            if any(
+                row.get("feedback_type") == "TICKET"
+                and str(row.get("ticket_id")) == body.ticket_id
+                and str(row.get("submitted_by_email") or row.get("submitted_by") or "")
+                .strip()
+                .casefold()
+                == identity["email"]
+                for row in feedback_rows
+            ):
+                raise HTTPException(status_code=409, detail="You have already submitted feedback for this ticket.")
+            if len(feedback_rows) >= 10000:
+                raise HTTPException(status_code=413, detail="Helpdesk feedback capacity exceeded.")
+            cur.execute(
+                """
+                SELECT TOP (1) [Name]
+                FROM [dbo].[AppUsers]
+                WHERE [IsActive] = 1 AND LOWER(LTRIM(RTRIM([Email]))) = ?
+                """,
+                identity["email"],
+            )
+            submitter = cur.fetchone()
+            submitter_name = (
+                str(submitter[0] or "").strip()
+                if submitter and submitter[0]
+                else body.name.strip()
+            )
+            row = {
+                "id": str(uuid.uuid4()),
+                "feedback_type": "TICKET",
+                "ticket_id": body.ticket_id,
+                "ticket_no": ticket.get("ticket_no"),
+                "branch_id": ticket.get("branch_id"),
+                "branch_name": _helpdesk_branch_name(
+                    cur, str(ticket.get("branch_id") or "")
+                ),
+                "building_id": ticket.get("building_id") or building_id,
+                "building_name": str(ticket.get("location") or ""),
+                "area_id": ticket.get("building_area_id"),
+                "floor_name": str(ticket.get("floor_name") or ""),
+                "area_name": str(ticket.get("area_name") or ""),
+                "feedback": body.feedback.strip(),
+                "rating": body.rating,
+                "submitted_by": identity["email"],
+                "submitted_by_email": identity["email"],
+                "submitted_by_name": submitter_name or identity["email"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            feedback_rows.insert(0, row)
+            _write_virtual(cur, "hd_feedback", feedback_rows)
+            return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Public Helpdesk ticket feedback submission failed")
+        raise HTTPException(status_code=503, detail="Unable to submit ticket feedback.") from exc
+
+
+@app.post("/api/helpdesk/tickets/{ticket_id}/feedback")
+def submit_helpdesk_ticket_feedback(
+    ticket_id: str,
+    body: HelpdeskTicketFeedbackRequest,
+    claims: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    if body.ticket_id != ticket_id:
+        raise HTTPException(status_code=400, detail="Ticket reference does not match the request.")
+    role = _current_role(claims)
+    if role not in {"ADMIN", "BRANCH_MANAGER", "EMPLOYEE"}:
+        raise HTTPException(status_code=403, detail="You do not have permission to submit ticket feedback.")
+    try:
+        with cursor() as cur:
+            cur.execute(
+                "SELECT * FROM [dbo].[HelpdeskTickets] WHERE [Id] = ?",
+                ticket_id,
+            )
+            rows = rows_as_dicts(cur)
+            if not rows:
+                raise HTTPException(status_code=404, detail="You cannot submit feedback for this ticket.")
+            ticket = _normalize("hd_tickets", rows[0], None)
+            cur.execute(
+                "SELECT [Email] FROM [dbo].[AppUsers] WHERE [Id] = ? AND [IsActive] = 1",
+                claims["sub"],
+            )
+            user_row = cur.fetchone()
+            current_email = str(user_row[0] or "").strip().casefold() if user_row else ""
+            if not current_email:
+                raise HTTPException(status_code=401, detail="A valid email is required for ticket feedback.")
+            if (
+                str(ticket.get("raiser_id") or "") != str(claims["sub"])
+                and str(ticket.get("raiser_email") or "").strip().casefold() != current_email
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the ticket raiser can submit feedback.",
+                )
+            if str(ticket.get("status") or "").strip().upper() != "CLOSED":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Feedback can only be submitted for closed tickets.",
+                )
+            if role in {"EMPLOYEE", "BRANCH_MANAGER"}:
+                _require_helpdesk_branch_access(
+                    cur, str(ticket.get("branch_id") or ""), claims
+                )
+            feedback_rows = _read_virtual(cur, "hd_feedback")
+            if any(
+                row.get("feedback_type") == "TICKET"
+                and str(row.get("ticket_id")) == ticket_id
+                and (
+                    (
+                        bool(current_email)
+                        and str(row.get("submitted_by_email") or "").strip().casefold()
+                        == current_email
+                    )
+                    or str(row.get("submitted_by") or "") == str(claims["sub"])
+                )
+                for row in feedback_rows
+            ):
+                raise HTTPException(status_code=409, detail="You have already submitted feedback for this ticket.")
+            if len(feedback_rows) >= 10000:
+                raise HTTPException(status_code=413, detail="Helpdesk feedback capacity exceeded.")
+            row = {
+                "id": str(uuid.uuid4()),
+                "feedback_type": "TICKET",
+                "ticket_id": ticket_id,
+                "ticket_no": ticket.get("ticket_no"),
+                "branch_id": ticket.get("branch_id"),
+                "branch_name": _helpdesk_branch_name(
+                    cur, str(ticket.get("branch_id") or "")
+                ),
+                "building_id": ticket.get("building_id") or "",
+                "building_name": str(ticket.get("location") or ""),
+                "area_id": ticket.get("building_area_id"),
+                "floor_name": str(ticket.get("floor_name") or ""),
+                "area_name": str(ticket.get("area_name") or ""),
+                "feedback": body.feedback.strip(),
+                "rating": body.rating,
+                "submitted_by": str(claims["sub"]),
+                "submitted_by_email": current_email,
+                "submitted_by_name": _current_user_name(claims),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            feedback_rows.insert(0, row)
+            _write_virtual(cur, "hd_feedback", feedback_rows)
+            return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Helpdesk ticket feedback submission failed")
+        raise HTTPException(status_code=503, detail="Unable to submit ticket feedback.") from exc
 
 
 @app.post("/api/helpdesk/feedback")
@@ -1916,14 +3125,69 @@ def list_helpdesk_feedback(
     _ensure_admin(claims)
     try:
         with cursor() as cur:
-            return _read_virtual(cur, "hd_feedback")
+            return _enrich_helpdesk_feedback_display_fields(
+                cur, _read_virtual(cur, "hd_feedback")
+            )
     except Exception as exc:
         logger.exception("Helpdesk feedback listing failed")
         raise HTTPException(status_code=503, detail="Unable to load Helpdesk feedback.") from exc
 
 
+def _visitor_checkin_window(
+    visit: dict[str, Any], now: datetime | None = None
+) -> tuple[bool, str]:
+    try:
+        visit_date_value = visit.get("VisitDate") or visit.get("visit_date")
+        arrival_value = visit.get("ExpectedArrival") or visit.get("expected_arrival")
+        departure_value = visit.get("ExpectedDeparture") or visit.get("expected_departure")
+        visit_date = (
+            visit_date_value.date()
+            if isinstance(visit_date_value, datetime)
+            else visit_date_value
+            if isinstance(visit_date_value, date)
+            else date.fromisoformat(str(visit_date_value)[:10])
+        )
+        arrival = (
+            arrival_value
+            if isinstance(arrival_value, time)
+            else time.fromisoformat(str(arrival_value))
+        )
+        departure = (
+            departure_value
+            if isinstance(departure_value, time)
+            else time.fromisoformat(str(departure_value))
+        )
+    except (TypeError, ValueError):
+        return False, "Check-in is unavailable because the visit schedule is incomplete."
+
+    timezone = ZoneInfo("Asia/Kolkata")
+    current = now or datetime.now(timezone)
+    if current.tzinfo is not None:
+        current = current.astimezone(timezone).replace(tzinfo=None)
+    start = datetime.combine(visit_date, arrival)
+    end = datetime.combine(visit_date, departure)
+    if departure <= arrival:
+        return False, "Check-in is unavailable because the visit schedule is invalid."
+    if current < start:
+        return False, f"Check-in opens at {arrival.strftime('%H:%M')} IST on {visit_date.isoformat()}."
+    if current >= end:
+        return False, (
+            f"The check-in window ended at {departure.strftime('%H:%M')} IST."
+        )
+    return True, f"Check-in is available until {departure.strftime('%H:%M')} IST."
+
+
+def _require_visitor_checkin_window(
+    visit: dict[str, Any], now: datetime | None = None
+) -> None:
+    available, message = _visitor_checkin_window(visit, now)
+    if not available:
+        raise HTTPException(status_code=409, detail=message)
+
+
 def _public_visit_payload(row: dict[str, Any]) -> dict[str, Any]:
     visit = _normalize("visit_requests", row, None)
+    checkin_available, checkin_window_message = _visitor_checkin_window(row)
     payload = {
         field: visit.get(field)
         for field in (
@@ -1932,6 +3196,16 @@ def _public_visit_payload(row: dict[str, Any]) -> dict[str, Any]:
             "expected_departure", "host_name", "status", "checked_in_at", "checked_out_at",
         )
     }
+    payload["check_in_available"] = (
+        checkin_available
+        if visit.get("status") in {"APPROVED", "CARD_ISSUED"}
+        else False
+    )
+    payload["check_in_window_message"] = (
+        checkin_window_message
+        if visit.get("status") in {"APPROVED", "CARD_ISSUED"}
+        else ""
+    )
     return payload
 
 
@@ -1959,6 +3233,7 @@ def send_visitor_checkin_otp(
             visit = _public_visit_by_token(cur, visit_id, body.token)
             if visit.get("Status") not in {"APPROVED", "CARD_ISSUED"}:
                 raise HTTPException(status_code=409, detail="This visit is no longer available for check-in.")
+            _require_visitor_checkin_window(visit)
             _require_visitor_inside_geofence(
                 cur, visit, body.latitude, body.longitude
             )
@@ -2042,6 +3317,7 @@ def verify_visitor_checkin_otp(
             visit = _public_visit_by_token(cur, visit_id, body.token)
             if visit.get("Status") not in {"APPROVED", "CARD_ISSUED"}:
                 raise HTTPException(status_code=409, detail="This visit has already been checked in.")
+            _require_visitor_checkin_window(visit)
             _require_visitor_inside_geofence(
                 cur, visit, body.latitude, body.longitude
             )
@@ -2112,7 +3388,9 @@ def verify_visitor_checkin_otp(
                         [UpdatedAt] = SYSUTCDATETIME()
                     WHERE [Id] = ? AND [QrTokenHash] = ?
                       AND [Status] IN ('APPROVED', 'CARD_ISSUED')
-                      AND [VisitDate] = CAST(SYSUTCDATETIME() AS date)
+                      AND [VisitDate] = CONVERT(date, DATEADD(MINUTE, 330, SYSUTCDATETIME()))
+                      AND CONVERT(time(0), DATEADD(MINUTE, 330, SYSUTCDATETIME())) >= [ExpectedArrival]
+                      AND CONVERT(time(0), DATEADD(MINUTE, 330, SYSUTCDATETIME())) < [ExpectedDeparture]
                     """,
                     visit_id,
                     hashlib.sha256(body.token.encode()).hexdigest(),
@@ -2120,7 +3398,7 @@ def verify_visitor_checkin_otp(
                 if cur.rowcount == 0:
                     raise HTTPException(
                         status_code=409,
-                        detail="This visit must be approved, have its guest pass issued, and be scheduled for today to check in.",
+                        detail="This visit must be approved and within its scheduled check-in window.",
                     )
                 cur.execute(
                     """
@@ -2645,6 +3923,7 @@ def approve_visit(
         actor = _current_user_name(claims)
         qr_token = _visitor_qr_token(visit_id)
         email_error = False
+        manager_notification_status = "NOT_SENT"
         try:
             with cursor() as cur:
                 _require_visit_branch_access(cur, visit_id, claims)
@@ -2687,6 +3966,9 @@ def approve_visit(
                     )
                     visit["emailSentAt"] = datetime.now(timezone.utc).isoformat()
                     visit["portalUrl"] = _visitor_checkin_url(visit_id, qr_token)
+                manager_notification_status = _notify_branch_managers_of_approved_visit(
+                    cur, visit
+                )
         except HTTPException:
             raise
         except Exception as exc:
@@ -2697,6 +3979,7 @@ def approve_visit(
                 status_code=502,
                 detail="Visit approved, but the invitation email could not be sent. Use Resend invitation to retry.",
             )
+        visit["branchManagerNotificationStatus"] = manager_notification_status
         return visit
 
 
@@ -3894,6 +5177,7 @@ def database_query(
     table: str,
     body: QueryRequest,
     claims: dict[str, Any] = Depends(current_user),
+    background_tasks: BackgroundTasks = None,
 ) -> dict[str, Any]:
     if table not in TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown application table: {table}")
@@ -3917,6 +5201,20 @@ def database_query(
             claims,
             {"ADMIN", "BRANCH_MANAGER", "EMPLOYEE", "SECURITY", "HSE"},
         )
+    if table == "hd_tickets" and body.action == "update":
+        changes = body.data if isinstance(body.data, dict) else {}
+        mapped_changes = {
+            _field(table, key, None).casefold(): value
+            for key, value in changes.items()
+        }
+        if (
+            {"providername", "assignedat"} & mapped_changes.keys()
+            or str(mapped_changes.get("status") or "").upper() == "ASSIGNED"
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Assign tickets through the service provider assignment workflow.",
+            )
 
     physical, module = _table_name(table)
     if table == "profiles" and body.action != "select":
@@ -3992,12 +5290,25 @@ def database_query(
         _require_roles(claims, {"ADMIN", "HSE"})
     if table == "emg_incident_employees" and body.action == "update":
         _require_roles(claims, {"ADMIN", "HSE", "FIRE_WARDEN"})
-    if table == "hd_notifications" and body.action in {"update", "delete"}:
-        _require_roles(claims, {"ADMIN", "SERVICE_PROVIDER"})
+    if table == "hd_notifications":
+        if body.action == "update":
+            changes = body.data if isinstance(body.data, dict) else {}
+            if changes != {"is_read": True}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Notifications can only be marked as read.",
+                )
+        if body.action in {"select", "update", "delete"}:
+            body.filters.append(
+                {"column": "recipient_id", "op": "eq", "value": claims["sub"]}
+            )
+        if body.action == "delete":
+            _require_roles(claims, {"ADMIN", "SERVICE_PROVIDER"})
     if table == "branches" and body.action in {"insert", "update", "upsert", "delete"}:
         _ensure_admin(claims)
     if physical == "[dbo].[AppSettings]":
         with cursor() as cur:
+            floor_renames: list[tuple[str, str, str]] = []
             if table == "hd_buildings" and body.action in {"insert", "upsert", "update"}:
                 incoming = body.data if isinstance(body.data, list) else [body.data or {}]
                 for row in incoming:
@@ -4051,17 +5362,32 @@ def database_query(
                         raise HTTPException(status_code=400, detail="An area requires a floor and area name.")
                     floor_name = str(row["floor"]).strip().casefold()
                     building_id = str(row["building_id"])
+                    configured_floors = [
+                        floor
+                        for floor in floors
+                        if str(floor.get("name") or "").strip().casefold() == floor_name
+                    ]
                     floor_exists = any(
-                        str(floor.get("building_id") or "") == building_id
-                        and str(floor.get("name") or "").strip().casefold() == floor_name
+                        str(floor.get("name") or "").strip().casefold() == floor_name
                         and floor.get("active", True)
                         for floor in floors
-                    ) or any(
+                    )
+                    legacy_floor_exists = not configured_floors and any(
                         str(area.get("building_id") or "") == building_id
                         and str(area.get("floor") or "").strip().casefold() == floor_name
                         for area in existing_areas
                     )
-                    if not floor_exists:
+                    existing_area = next(
+                        (
+                            area
+                            for area in existing_areas
+                            if str(area.get("id") or "") == str(row.get("id") or "")
+                            and str(area.get("building_id") or "") == building_id
+                            and str(area.get("floor") or "").strip().casefold() == floor_name
+                        ),
+                        None,
+                    )
+                    if not (floor_exists or legacy_floor_exists or existing_area):
                         raise HTTPException(status_code=400, detail="Choose a floor configured for this building.")
             if table == "hd_building_floors" and body.action in {"insert", "upsert", "update"}:
                 incoming = body.data if isinstance(body.data, list) else [body.data or {}]
@@ -4070,16 +5396,55 @@ def database_query(
                 for row in incoming:
                     building_id = str(row.get("building_id") or "")
                     name = str(row.get("name") or "").strip()
-                    if not building_id or building_id not in buildings or not name:
-                        raise HTTPException(status_code=400, detail="A floor requires a valid building and floor name.")
-                    duplicate = any(
-                        str(floor.get("building_id") or "") == building_id
-                        and str(floor.get("name") or "").strip().casefold() == name.casefold()
-                        and str(floor.get("id") or "") != str(row.get("id") or "")
-                        for floor in existing_floors
+                    floor_number = str(row.get("floor_number") or name).strip()
+                    if (building_id and building_id not in buildings) or not name or not floor_number:
+                        raise HTTPException(status_code=400, detail="A floor requires a valid floor number and, when scoped, a valid building.")
+                    existing_floor = next(
+                        (
+                            floor
+                            for floor in existing_floors
+                            if str(floor.get("id") or "") == str(row.get("id") or "")
+                        ),
+                        None,
                     )
-                    if duplicate:
-                        raise HTTPException(status_code=409, detail="That floor already exists for this building.")
+                    unchanged_identity = (
+                        existing_floor is not None
+                        and str(existing_floor.get("name") or "").strip().casefold()
+                        == name.casefold()
+                        and str(
+                            existing_floor.get("floor_number")
+                            or existing_floor.get("name")
+                            or ""
+                        )
+                        .strip()
+                        .casefold()
+                        == floor_number.casefold()
+                    )
+                    if not unchanged_identity:
+                        duplicate = any(
+                            str(floor.get("id") or "") != str(row.get("id") or "")
+                            and (
+                                str(floor.get("name") or "").strip().casefold() == name.casefold()
+                                or str(floor.get("floor_number") or floor.get("name") or "").strip().casefold()
+                                == floor_number.casefold()
+                            )
+                            for floor in existing_floors
+                        )
+                        if duplicate:
+                            raise HTTPException(status_code=409, detail="That floor number or name already exists.")
+                floor_renames = [
+                    (
+                        str(previous.get("building_id") or ""),
+                        str(previous.get("name") or "").strip().casefold(),
+                        str(row.get("name") or "").strip(),
+                    )
+                    for row in incoming
+                    for previous in existing_floors
+                    if str(previous.get("id") or "") == str(row.get("id") or "")
+                    and str(previous.get("name") or "").strip()
+                    and str(previous.get("name") or "").strip()
+                    != str(row.get("name") or "").strip()
+                ]
             if table == "hd_buildings" and body.action == "delete":
                 buildings = _filter_virtual(
                     _read_virtual(cur, "hd_buildings"), body.filters
@@ -4103,7 +5468,20 @@ def database_query(
                                 if str(row.get("building_id") or "") not in building_ids
                             ],
                         )
-            return _virtual_query(cur, table, body)
+            result = _virtual_query(cur, table, body)
+            if floor_renames:
+                areas = _read_virtual(cur, "hd_building_areas")
+                changed = False
+                rename_lookup = {old_name: new_name for _, old_name, new_name in floor_renames}
+                for area in areas:
+                    key = str(area.get("floor") or "").strip().casefold()
+                    renamed = rename_lookup.get(key)
+                    if renamed:
+                        area["floor"] = renamed
+                        changed = True
+                if changed:
+                    _write_virtual(cur, "hd_building_areas", areas)
+            return result
 
     try:
         with cursor() as cur:
@@ -4158,6 +5536,7 @@ def database_query(
                             row_data["source"] = "WALK_IN"
                             row_data["status"] = "PENDING"
                         row_data = _prepare_visit_insert(row_data)
+                        _validate_visit_schedule(row_data)
                     if (
                         table == "visit_requests"
                         and "visitor_type" in row_data
@@ -4413,6 +5792,7 @@ def database_query(
                                 if delivery_failures < len(email_providers)
                                 else "FAILED"
                             )
+                    manager_notification_status = "NOT_APPLICABLE"
                     if table == "visit_requests" and inserted.get("Status") == "APPROVED":
                         qr_token = _visitor_qr_token(str(inserted["Id"]))
                         cur.execute(
@@ -4437,6 +5817,10 @@ def database_query(
                             inserted["Id"],
                         )
                         inserted["InvitationSentAt"] = datetime.now(timezone.utc)
+                        approved_visit = _normalize(table, inserted, module)
+                        manager_notification_status = (
+                            _notify_branch_managers_of_approved_visit(cur, approved_visit)
+                        )
                     if table == "visit_requests":
                         visit_notification = _normalize(table, inserted, module)
                         if str(inserted.get("Status") or "").upper() == "PENDING":
@@ -4510,6 +5894,10 @@ def database_query(
                                 ),
                             )
                     normalized = _normalize(table, inserted, module)
+                    if table == "visit_requests" and manager_notification_status != "NOT_APPLICABLE":
+                        normalized["branch_manager_notification_status"] = (
+                            manager_notification_status
+                        )
                     if table == "hd_tickets":
                         normalized["provider_notification_status"] = provider_notification_status
                         normalized["provider_in_app_notification_status"] = (
@@ -4530,6 +5918,17 @@ def database_query(
                 params.extend(scope_params)
             if body.action == "update":
                 changes = body.data if isinstance(body.data, dict) else {}
+                closure_candidates: list[dict[str, Any]] = []
+                if table == "hd_tickets" and str(changes.get("status") or "").upper() == "CLOSED":
+                    cur.execute(
+                        f"""
+                        SELECT [Id], [TicketNo], [RaisedByUserId], [RaisedByName], [RaisedByEmail],
+                               [Category], [Location], [BuildingId], [Status]
+                        FROM {physical} WITH (UPDLOCK, ROWLOCK){where}
+                        """,
+                        params,
+                    )
+                    closure_candidates = rows_as_dicts(cur)
                 if (
                     table == "visit_requests"
                     and "visitor_type" in changes
@@ -4553,6 +5952,60 @@ def database_query(
                 sql = f"UPDATE {physical} SET {assignments} OUTPUT INSERTED.*{where}"
                 cur.execute(sql, list(mapped.values()) + params)
                 affected = [_normalize(table, row, module) for row in rows_as_dicts(cur)]
+                if table == "hd_tickets" and closure_candidates:
+                    candidate_ids = {
+                        str(row.get("Id") or ""): row
+                        for row in closure_candidates
+                        if str(row.get("Status") or "").upper() != "CLOSED"
+                    }
+                    closed_tickets = [
+                        ticket
+                        for ticket in affected
+                        if str(ticket.get("id") or "") in candidate_ids
+                        and str(ticket.get("status") or "").upper() == "CLOSED"
+                    ]
+                    if closed_tickets:
+                        try:
+                            cur.execute(
+                                """
+                                SELECT [Name], [Email]
+                                FROM [dbo].[AppUsers]
+                                WHERE [IsActive] = 1 AND [Role] = 'ADMIN'
+                                  AND [Email] IS NOT NULL AND LTRIM(RTRIM([Email])) <> ''
+                                ORDER BY [Id]
+                                """
+                            )
+                            admin_recipients = rows_as_dicts(cur)
+                        except Exception:
+                            admin_recipients = []
+                            logger.exception(
+                                "Unable to load admin email recipients for closed Helpdesk tickets"
+                            )
+                        for ticket in closed_tickets:
+                            previous = candidate_ids[str(ticket["id"])]
+                            recipients = list(admin_recipients)
+                            raiser_email = str(previous.get("RaisedByEmail") or "").strip()
+                            if raiser_email:
+                                recipients.append(
+                                    {
+                                        "Name": previous.get("RaisedByName"),
+                                        "Email": raiser_email,
+                                        "PublicRequester": not bool(
+                                            str(previous.get("RaisedByUserId") or "").strip()
+                                        ),
+                                    }
+                                )
+                            if background_tasks is None:
+                                logger.error(
+                                    "Helpdesk closure emails could not be scheduled for ticket %s",
+                                    ticket.get("ticket_no") or ticket.get("id"),
+                                )
+                            else:
+                                background_tasks.add_task(
+                                    _send_helpdesk_closed_ticket_emails,
+                                    recipients,
+                                    ticket,
+                                )
                 return {"data": affected, "error": None, "count": len(affected) if body.count else None}
             cur.execute(f"DELETE FROM {physical} OUTPUT DELETED.*{where}", params)
             affected = [_normalize(table, row, module) for row in rows_as_dicts(cur)]

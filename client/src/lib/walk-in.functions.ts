@@ -3,6 +3,7 @@ import { localDb } from "@/services/local-client";
 import { VMS_BRANCH_FILTERS } from "@/constants/vms-filters";
 import { isSelectableVisitorType, visitorTypeLabel } from "@/constants/visitor-types";
 import { listBranches } from "@/services/branches";
+import { isPastVisitStart, todayBusinessISO } from "@/lib/visit-schedule";
 
 export async function getWalkInOptions() {
   const [types, locs, employees, branches] = await Promise.all([
@@ -75,6 +76,9 @@ const schema = z
 /** Public: a walk-in guest submits a same-day request to the chosen host. */
 export async function submitWalkIn({ data: input }: { data: unknown }) {
   const data = schema.parse(input);
+  if (isPastVisitStart(todayBusinessISO(), data.expected_arrival)) {
+    throw new Error("Invalid time. Please select a proper time schedule.");
+  }
   if (!isSelectableVisitorType(data.visitor_type)) {
     throw new Error("Please choose an available visitor type.");
   }
@@ -94,7 +98,7 @@ export async function submitWalkIn({ data: input }: { data: unknown }) {
     .eq("id", data.host_id)
     .maybeSingle();
   if (!host) throw new Error("Please choose who you are visiting.");
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayBusinessISO();
   const { data: visit, error } = await localDb
     .from("visit_requests")
     .insert({

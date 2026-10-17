@@ -20,6 +20,7 @@ import { NewRequestDialog } from "@/components/visits/NewRequestDialog";
 import { VisitorPassDialog } from "@/components/visits/VisitorPassDialog";
 import { StatusPill } from "@/components/common/StatusBadge";
 import { EmptyRow } from "@/components/common/TableCard";
+import { PageSizeSelect } from "@/components/common/PageSizeSelect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -90,6 +91,7 @@ function VisitorsPage() {
   const [date, setDate] = useState("");
   const [sortDesc, setSortDesc] = useState(true);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [creating, setCreating] = useState(false);
   const [rejecting, setRejecting] = useState<VisitRequest | null>(null);
   const [pass, setPass] = useState<VisitRequest | null>(null);
@@ -138,7 +140,6 @@ function VisitorsPage() {
       const comparison = `${a.visit_date} ${a.expected_arrival}`.localeCompare(`${b.visit_date} ${b.expected_arrival}`);
       return sortDesc ? -comparison : comparison;
     });
-  const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
   const pageRows = rows.slice((page - 1) * pageSize, page * pageSize);
   const typeName = (code: string) =>
@@ -346,10 +347,19 @@ function VisitorsPage() {
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-2.5 py-2 text-[9px] text-muted-foreground">
           <span>Showing {rows.length ? (page - 1) * pageSize + 1 : 0}–{Math.min(page * pageSize, rows.length)} of {rows.length}</span>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <PageSizeSelect
+              value={pageSize}
+              onChange={(size) => {
+                setPageSize(size);
+                setPage(1);
+              }}
+            />
+            <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" className="h-6 px-2 text-[9px]" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>Previous</Button>
             <span>Page {page} of {pageCount}</span>
             <Button variant="outline" size="sm" className="h-6 px-2 text-[9px]" disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}>Next</Button>
+            </div>
           </div>
         </div>
       </section>

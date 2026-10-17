@@ -1,12 +1,29 @@
 import { useNavigate } from "@tanstack/react-router";
-import { Eye, LifeBuoy } from "lucide-react";
+import { Eye, LifeBuoy, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StatusPill } from "@/components/common/StatusBadge";
 import { EmptyRow } from "@/components/common/TableCard";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import type { HdTicket } from "@/services/helpdesk-api";
 
-export function TicketTable({ tickets, empty }: { tickets: HdTicket[]; empty: string }) {
+export function TicketTable({
+  tickets,
+  empty,
+  canFeedback,
+  onFeedback,
+}: {
+  tickets: HdTicket[];
+  empty: string;
+  canFeedback?: (ticket: HdTicket) => boolean;
+  onFeedback?: (ticket: HdTicket) => void;
+}) {
   const navigate = useNavigate();
   return (
     <Table>
@@ -32,19 +49,42 @@ export function TicketTable({ tickets, empty }: { tickets: HdTicket[]; empty: st
         ) : null}
         {tickets.map((t) => (
           <TableRow key={t.id}>
-            <TableCell className="font-mono text-[12px] text-muted-foreground">{t.ticket_no}</TableCell>
+            <TableCell className="font-mono text-[12px] text-muted-foreground">
+              {t.ticket_no}
+            </TableCell>
             <TableCell className="font-semibold">{t.category_name}</TableCell>
             <TableCell className="text-[13px]">{t.subcategory_name || "—"}</TableCell>
             <TableCell className="text-[13px]">{t.location || "—"}</TableCell>
-            <TableCell className="text-[13px]">{t.priority ? t.priority.charAt(0) + t.priority.slice(1).toLowerCase() : "Medium"}</TableCell>
+            <TableCell className="text-[13px]">
+              {t.priority ? t.priority.charAt(0) + t.priority.slice(1).toLowerCase() : "Medium"}
+            </TableCell>
             <TableCell className="text-[13px]">{t.provider_name || "Unassigned"}</TableCell>
             <TableCell className="text-[13px]">{new Date(t.created_at).toLocaleString()}</TableCell>
-            <TableCell><StatusPill status={t.status} /></TableCell>
+            <TableCell>
+              <StatusPill status={t.status} />
+            </TableCell>
             <TableCell>
               <div className="flex justify-end gap-1">
-                <Button size="icon" variant="ghost" title="Open ticket" aria-label={`Open ${t.ticket_no}`} onClick={() => navigate({ to: "/hd-ticket/$id", params: { id: t.id } })}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Open ticket"
+                  aria-label={`Open ${t.ticket_no}`}
+                  onClick={() => navigate({ to: "/hd-ticket/$id", params: { id: t.id } })}
+                >
                   <Eye className="size-4" />
                 </Button>
+                {onFeedback && (!canFeedback || canFeedback(t)) ? (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title={`Give feedback for ${t.ticket_no}`}
+                    aria-label={`Give feedback for ${t.ticket_no}`}
+                    onClick={() => onFeedback(t)}
+                  >
+                    <Star className="size-4 text-amber-500" />
+                  </Button>
+                ) : null}
               </div>
             </TableCell>
           </TableRow>

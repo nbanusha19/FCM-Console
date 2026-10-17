@@ -7,10 +7,19 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useApp } from "@/context/app-context";
-import { todayISO } from "@/services/vms";
+import { isPastVisitStart, todayBusinessISO } from "@/lib/visit-schedule";
 import { useQuery } from "@tanstack/react-query";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { branchHostOptionLabel, createVisitRequest, listBranchHosts, listLocations, listVisitorEmployeeOptions, listVisitorTypes, type VisitInput } from "@/services/visitor-requests";
+import {
+  branchHostOptionLabel,
+  createVisitRequest,
+  isVisitReviewer,
+  listBranchHosts,
+  listLocations,
+  listVisitorEmployeeOptions,
+  listVisitorTypes,
+  type VisitInput,
+} from "@/services/visitor-requests";
 import { notifyHostForApproval } from "@/services/vms-notify";
 
 type Errors = Partial<Record<keyof VisitInput, string | undefined>>;
@@ -31,7 +40,7 @@ function emptyForm(): VisitInput {
     designation: "",
     purpose: "",
     host_name: "",
-    visit_date: todayISO(),
+    visit_date: todayBusinessISO(),
     expected_arrival: "10:00",
     expected_departure: "12:00",
     remarks: "",
@@ -45,6 +54,70 @@ function Field({ label, error, children }: { label: string; error?: string | und
       {children}
       {error ? <p className="text-[12px] font-medium text-danger">{error}</p> : null}
     </div>
+  );
+}
+
+const TIME_HOURS = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0"));
+const TIME_MINUTES = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, "0"));
+
+function TimeField({
+  label,
+  value,
+  onChange,
+  error,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  error?: string | undefined;
+}) {
+  const [rawHours = "10", minutes = "00"] = value.split(":");
+  const hour24 = Number(rawHours);
+  const hour12 = String(hour24 % 12 || 12).padStart(2, "0");
+  const period = hour24 >= 12 ? "PM" : "AM";
+  const update = (nextHour: string, nextMinute: string, nextPeriod: string) => {
+    const hours24 = (Number(nextHour) % 12) + (nextPeriod === "PM" ? 12 : 0);
+    onChange(`${String(hours24).padStart(2, "0")}:${nextMinute}`);
+  };
+
+  return (
+    <Field label={label} error={error}>
+      <div className="grid grid-cols-[1fr_1fr_0.9fr] gap-1.5">
+        <Select value={hour12} onValueChange={(next) => update(next, minutes, period)}>
+          <SelectTrigger aria-label={`${label} hour`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {TIME_HOURS.map((hour) => (
+              <SelectItem key={hour} value={hour}>
+                {hour}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={minutes} onValueChange={(next) => update(hour12, next, period)}>
+          <SelectTrigger aria-label={`${label} minute`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {TIME_MINUTES.map((minute) => (
+              <SelectItem key={minute} value={minute}>
+                {minute}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={period} onValueChange={(next) => update(hour12, minutes, next)}>
+          <SelectTrigger aria-label={`${label} AM or PM`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="AM">AM</SelectItem>
+            <SelectItem value="PM">PM</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+    </Field>
   );
 }
 
@@ -114,7 +187,15 @@ export function NewRequestDialog({
     if (!form.location) e.location = "Choose the location.";
     if (form.purpose.trim().length < 3) e.purpose = "Describe the purpose of the visit.";
     if (!form.visit_date) e.visit_date = "Select the visit date.";
-    else if (form.visit_date < todayISO()) e.visit_date = "Visit date cannot be in the past.";
+    else if (form.visit_date < todayBusinessISO()) e.visit_date = "Visit date cannot be in the past.";
+    if (
+      form.visit_date &&
+      form.expected_arrival &&
+      form.visit_date === todayBusinessISO() &&
+      isPastVisitStart(form.visit_date, form.expected_arrival)
+    ) {
+      e.expected_arrival = "Invalid time. Please select a proper time schedule.";
+    }
     if (form.expected_departure <= form.expected_arrival) e.expected_departure = "End time must be after start time.";
     setErrors(e);
     return Object.keys(e).length === 0;
@@ -270,8 +351,16 @@ export function NewRequestDialog({
               Unable to load hosts for this branch: {hostsError.message}
             </p>
           ) : null}
-          <Field label="Visitor name" error={errors.visitor_name}>{input("visitor_name", { readOnly: form.visitor_type === "EMPLOYEE" })}</Field>
-          <Field label="Company / branch" error={errors.company}>{input("company", { readOnly: form.visitor_type === "EMPLOYEE" })}</Field>
+          {form.visitor_type !== "EMPLOYEE" ? (
+            <>
+              <Field label="Visitor name" error={errors.visitor_name}>
+                {input("visitor_name")}
+              </Field>
+              <Field label="Company / branch" error={errors.company}>
+                {input("company")}
+              </Field>
+            </>
+          ) : null}
           <Field label="Email" error={errors.email}>{input("email", { type: "email", readOnly: form.visitor_type === "EMPLOYEE" })}</Field>
           <Field label="Phone" error={errors.phone}>{input("phone", { readOnly: form.visitor_type === "EMPLOYEE" })}</Field>
           <Field label="Designation">{input("designation", { readOnly: form.visitor_type === "EMPLOYEE" })}</Field>
@@ -334,11 +423,19 @@ export function NewRequestDialog({
               <SelectContent>{locations.map((l) => <SelectItem key={l.id} value={l.name}>{l.name}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
-          <Field label="Visit date" error={errors.visit_date}>{input("visit_date", { type: "date", min: todayISO() })}</Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Start time">{input("expected_arrival", { type: "time" })}</Field>
-            <Field label="End time" error={errors.expected_departure}>{input("expected_departure", { type: "time" })}</Field>
-          </div>
+          <Field label="Visit date" error={errors.visit_date}>{input("visit_date", { type: "date", min: todayBusinessISO() })}</Field>
+          <TimeField
+            label="Start time"
+            value={form.expected_arrival}
+            onChange={(value) => set("expected_arrival", value)}
+            error={errors.expected_arrival}
+          />
+          <TimeField
+            label="End time"
+            value={form.expected_departure}
+            onChange={(value) => set("expected_departure", value)}
+            error={errors.expected_departure}
+          />
           <div className="sm:col-span-2">
             <Field label="Purpose" error={errors.purpose}>{input("purpose")}</Field>
           </div>
@@ -351,7 +448,8 @@ export function NewRequestDialog({
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button disabled={saving} onClick={() => void submit()}>
-            {saving ? <Loader2 className="size-4 animate-spin" /> : null} Submit request
+            {saving ? <Loader2 className="size-4 animate-spin" /> : null}
+            {isVisitReviewer(user) ? "Schedule" : "Submit request"}
           </Button>
         </DialogFooter>
       </DialogContent>

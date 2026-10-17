@@ -7,7 +7,6 @@ import {
   Loader2,
   Paperclip,
   Play,
-  UserPlus,
   Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -146,13 +145,11 @@ function TicketDetailsPage() {
     );
   }
 
-  const canAssign = isAdmin && ticket.status === "NEW";
   const canAssignAndStart = isProvider && ticket.status === "NEW" && !ticket.provider_name;
   const canStartWork = isProvider && canMoveTicket(ticket.status, "IN_PROGRESS");
   const canCompleteWork = isProvider && canMoveTicket(ticket.status, "RESOLVED");
   const canClose = (isAdmin || isProvider) && canMoveTicket(ticket.status, "CLOSED");
   const showActions =
-    canAssign ||
     canAssignAndStart ||
     canStartWork ||
     canCompleteWork ||
@@ -172,20 +169,6 @@ function TicketDetailsPage() {
     } finally {
       setBusy(false);
       setConfirmClose(false);
-    }
-  };
-  const assign = async () => {
-    const p = providers.find((x) => x.id === assignTo);
-    if (!p) return;
-    setBusy(true);
-    try {
-      await ticketService.assign(ticket, p, user);
-      toast.success(`Assigned to ${p.name}`);
-      await reload();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Unable to assign the ticket.");
-    } finally {
-      setBusy(false);
     }
   };
   const assignAndStart = async () => {
@@ -372,30 +355,6 @@ function TicketDetailsPage() {
           <div className="space-y-6">
             <section className="surface-card space-y-3 p-6">
               <h2 className="font-display text-[16px] font-bold">Actions</h2>
-              {canAssign ? (
-                <div className="space-y-2">
-                  <Label>Assign to provider</Label>
-                  <Select value={assignTo} onValueChange={setAssignTo}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select provider" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providers.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    className="w-full"
-                    disabled={!assignTo || busy}
-                    onClick={() => void assign()}
-                  >
-                    <UserPlus className="size-4" /> Assign ticket
-                  </Button>
-                </div>
-              ) : null}
               {canAssignAndStart ? (
                 <div className="space-y-2">
                   <Label>Assign to service provider</Label>

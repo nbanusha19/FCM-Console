@@ -12,7 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { EmptyRow } from "@/components/common/TableCard";
+import { EmptyRow, usePaged } from "@/components/common/TableCard";
 import { Pill } from "@/components/common/StatusBadge";
 import { QrImage } from "@/components/common/QrImage";
 import { useApp } from "@/context/app-context";
@@ -47,6 +47,7 @@ export function WorkersPanel({ permit }: { permit: Permit }) {
   const [pass, setPass] = useState<Worker | null>(null);
   const [registering, setRegistering] = useState<Worker | null>(null);
   const [workerPhoto, setWorkerPhoto] = useState<string | null>(null);
+  const pagedWorkers = usePaged(workers);
   const canAct =
     isPermitSecurity(user) &&
     ["VENDOR_SUBMITTED", "SECURITY_REGISTERED", "ACTIVE"].includes(permit.status);
@@ -119,10 +120,10 @@ export function WorkersPanel({ permit }: { permit: Permit }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {workers.length === 0 ? (
+          {pagedWorkers.rows.length === 0 ? (
             <EmptyRow cols={6}>Waiting for the vendor to submit worker details.</EmptyRow>
           ) : null}
-          {workers.map((worker) => {
+          {pagedWorkers.rows.map((worker) => {
             const attendance = att.find(
               (record) => record.worker_id === worker.id && record.day === today,
             );
@@ -203,6 +204,7 @@ export function WorkersPanel({ permit }: { permit: Permit }) {
           })}
         </TableBody>
       </Table>
+      {pagedWorkers.footer}
 
       {att.length ? (
         <div className="border-t border-border px-5 py-3">

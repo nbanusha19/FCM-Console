@@ -86,40 +86,45 @@ function HelpdeskDashboard() {
       ) as Record<(typeof TICKET_STATUS_KEYS)[number], number>,
     [visible],
   );
-  const sum = useMemo(
-    () => ({
-      newOrAssigned: countsByStatus.NEW + countsByStatus.ASSIGNED,
-      inProgress: countsByStatus.IN_PROGRESS,
-      resolved: countsByStatus.RESOLVED,
-      closed: countsByStatus.CLOSED,
-    }),
-    [countsByStatus],
-  );
   const statusCounts = useMemo(() => {
     if (isAdmin) {
       return [
-        { status: "OPEN", name: "New / assigned", count: sum.newOrAssigned },
-        { status: "IN_PROGRESS", name: ticketStatusLabel("IN_PROGRESS"), count: sum.inProgress },
-        { status: "RESOLVED", name: ticketStatusLabel("RESOLVED"), count: sum.resolved },
-        { status: "CLOSED", name: ticketStatusLabel("CLOSED"), count: sum.closed },
+        { status: "NEW", name: "Open", count: countsByStatus.NEW },
+        { status: "ASSIGNED", name: ticketStatusLabel("ASSIGNED"), count: countsByStatus.ASSIGNED },
+        {
+          status: "IN_PROGRESS",
+          name: ticketStatusLabel("IN_PROGRESS"),
+          count: countsByStatus.IN_PROGRESS,
+        },
+        { status: "RESOLVED", name: ticketStatusLabel("RESOLVED"), count: countsByStatus.RESOLVED },
+        { status: "CLOSED", name: ticketStatusLabel("CLOSED"), count: countsByStatus.CLOSED },
       ];
     }
     if (!isProvider) {
       return [
-        { status: "OPEN", name: "New / assigned", count: sum.newOrAssigned },
-        { status: "IN_PROGRESS", name: ticketStatusLabel("IN_PROGRESS"), count: sum.inProgress },
-        { status: "COMPLETED", name: "Completed", count: sum.resolved + sum.closed },
+        { status: "NEW", name: "Open", count: countsByStatus.NEW },
+        { status: "ASSIGNED", name: ticketStatusLabel("ASSIGNED"), count: countsByStatus.ASSIGNED },
+        {
+          status: "IN_PROGRESS",
+          name: ticketStatusLabel("IN_PROGRESS"),
+          count: countsByStatus.IN_PROGRESS,
+        },
+        {
+          status: "COMPLETED",
+          name: "Completed",
+          count: countsByStatus.RESOLVED + countsByStatus.CLOSED,
+        },
       ];
     }
     return TICKET_STATUS_KEYS.map((status) => ({
       status,
-      name: ticketStatusLabel(status),
+      name: status === "NEW" ? "Open" : ticketStatusLabel(status),
       count:
         status === "ASSIGNED"
           ? countsByStatus.ASSIGNED + countsByStatus.IN_PROGRESS
           : countsByStatus[status],
     }));
-  }, [countsByStatus, sum, isAdmin, isProvider]);
+  }, [countsByStatus, isAdmin, isProvider]);
   const statusColors: Record<string, string> = {
     OPEN: "#f59e0b",
     NEW: "#f59e0b",
@@ -134,9 +139,7 @@ function HelpdeskDashboard() {
     <div className="space-y-6">
       <PageHeader
         eyebrow="FCM Helpdesk"
-        title={
-          isProvider ? "Service provider dashboard" : isAdmin ? "Helpdesk dashboard" : "My helpdesk"
-        }
+        title={isProvider ? "Service provider dashboard" : "Helpdesk dashboard"}
         subtitle={
           isProvider
             ? "Tickets assigned to your team."
@@ -146,16 +149,22 @@ function HelpdeskDashboard() {
         }
         actions={
           <>
-            {!isProvider ? (
+            {isAdmin ? (
               <Button variant="outline" onClick={() => navigate({ to: "/hd-qr" })}>
                 <QrCode className="size-4" /> Helpdesk QR
+              </Button>
+            ) : user?.role === "BRANCH_MANAGER" || user?.role === "EMPLOYEE" ? (
+              <Button onClick={() => navigate({ to: "/hd-raise" })}>
+                <Wrench className="size-4" /> Raise request
               </Button>
             ) : null}
           </>
         }
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      <div
+        className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${isAdmin || isProvider ? "xl:grid-cols-5" : "xl:grid-cols-4"}`}
+      >
         {statusCounts.map((entry) => {
           const icon =
             entry.status === "IN_PROGRESS"

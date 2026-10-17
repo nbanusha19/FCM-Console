@@ -9,14 +9,14 @@ export interface NavItem {
 
 const HOME: NavItem = { to: "/home", label: "Home" };
 const s = (to: string, label: string): NavItem => ({ to, label, sub: true });
-const EWP: NavItem = { to: "/ework-permit", label: "E-Work Permit" };
+const EWP: NavItem = { to: "/ework-permit", label: "Dashboard" };
 const EWP_NEW = s("/ework-permit/new", "Create permit");
 const EWP_ALL = s("/ework-permit/all", "All permits");
-const EWP_REVIEW = s("/ework-permit/review", "Pending H&S review");
+const EWP_REVIEW = s("/ework-permit/review", "Pending HSE review");
 const EWP_SEC = s("/ework-permit/security", "Gate verification");
 const EWP_REP = s("/ework-permit/reports", "Permit reports");
 const EWP_SET = s("/ework-permit/setup", "Vendors & locations");
-const EMG: NavItem = { to: "/emergency", label: "Emergency" };
+const EMG: NavItem = { to: "/emergency", label: "Dashboard" };
 const EMG_WARDEN: NavItem[] = [
   EMG,
   s("/emergency/history", "Incident history"),
@@ -48,16 +48,17 @@ const VMS_EMPLOYEE: NavItem[] = [
 ];
 /** Helpdesk area per audience. */
 const HD_EMPLOYEE: NavItem[] = [
-  { to: "/helpdesk", label: "Helpdesk" },
+  { to: "/helpdesk", label: "Dashboard" },
   s("/hd-tickets", "My tickets"),
+  s("/hd-history", "Ticket history"),
 ];
 const HD_PROVIDER: NavItem[] = [
-  { to: "/helpdesk", label: "Helpdesk" },
+  { to: "/helpdesk", label: "Dashboard" },
   s("/hd-assigned", "Service request queue"),
   s("/hd-history", "Ticket history"),
 ];
 const HD_ADMIN: NavItem[] = [
-  { to: "/helpdesk", label: "Helpdesk" },
+  { to: "/helpdesk", label: "Dashboard" },
   s("/hd-tickets", "All tickets"),
   s("/hd-feedback", "Building feedback"),
   s("/hd-reports", "Reports"),

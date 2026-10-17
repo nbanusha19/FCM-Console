@@ -345,16 +345,8 @@
 }
 
 .home-launcher-grid {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-@media (min-width: 640px) {
-  .home-launcher-grid {
-    grid-template-columns: repeat(2, minmax(0, var(--launcher-tile-width, 37rem)));
-    grid-template-rows: repeat(2, var(--launcher-tile-height));
-    justify-content: center;
-    align-content: center;
-  }
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
 }
 
 .home-module-card {
@@ -370,25 +362,10 @@
 
 .home-launcher-tile {
   --module-accent: var(--primary);
-  border-color: color-mix(in oklch, var(--module-accent) 22%, var(--border));
-  background-color: color-mix(in oklch, var(--module-accent) 7%, var(--card));
+  border-color: color-mix(in oklab, var(--color-border) 70%, transparent);
+  background-color: color-mix(in oklab, var(--color-card) var(--surface-opacity), transparent);
+  backdrop-filter: blur(12px);
   box-shadow: var(--shadow-card);
-}
-
-.home-launcher-tile--visitors {
-  --module-accent: var(--primary);
-}
-
-.home-launcher-tile--permit {
-  --module-accent: color-mix(in oklch, var(--primary) 58%, var(--success) 42%);
-}
-
-.home-launcher-tile--helpdesk {
-  --module-accent: var(--success);
-}
-
-.home-launcher-tile--emergency {
-  --module-accent: color-mix(in oklch, var(--success) 72%, oklch(0.72 0.13 145) 28%);
 }
 
 .home-launcher-tile:hover {
@@ -397,13 +374,13 @@
 }
 
 .home-launcher-art {
-  background-color: color-mix(in oklch, var(--module-accent) 15%, var(--card));
+  background-color: color-mix(in oklab, var(--color-primary) 8%, var(--color-card));
   color: var(--module-accent);
   transition: transform 220ms ease;
 }
 
 .home-launcher-art-badge {
-  border-color: color-mix(in oklch, var(--module-accent) 24%, var(--border));
+  border-color: color-mix(in oklab, var(--color-border) 70%, transparent);
   background-color: var(--card);
   color: var(--module-accent);
 }

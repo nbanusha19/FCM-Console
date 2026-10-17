@@ -1,10 +1,12 @@
 import unittest
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from email.message import EmailMessage
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
+from starlette.background import BackgroundTasks
 from pydantic import ValidationError
 
 from database import connection_string
@@ -13,13 +15,19 @@ from app import (
     TABLES,
     QueryRequest,
     HelpdeskFeedbackRequest,
+    HelpdeskTicketFeedbackRequest,
     HelpdeskAssignmentRequest,
+    PublicHelpdeskOtpRequest,
+    PublicHelpdeskOtpVerifyRequest,
+    PublicHelpdeskTicketRequest,
+    PublicHelpdeskFeedbackRequest,
     RpcRequest,
     VisitorTokenRequest,
     VisitorCheckInOtpRequest,
     VisitorCheckInOtpVerifyRequest,
     _read_virtual,
     _prepare_visit_insert,
+    _validate_visit_schedule,
     _prepare_branch_manager_visit,
     _apply_internal_visitor,
     _file_path,
@@ -28,9 +36,14 @@ from app import (
     _next_helpdesk_ticket_no,
     _next_emergency_incident_no,
     _send_visitor_invitation,
+    _send_branch_manager_visit_approved_email,
+    _notify_branch_managers_of_approved_visit,
     _require_safety_report_mutation_access,
     _send_branch_manager_visit_request_email,
     _send_helpdesk_ticket_email,
+    _send_helpdesk_closed_ticket_emails,
+    _send_visitor_checkin_otp_email,
+    _send_public_helpdesk_otp,
     _emergency_email_response_token,
     _decode_emergency_email_response_token,
     _visitor_email_decision_token,
@@ -47,6 +60,14 @@ from app import (
     _visitor_checkin_url,
     _visitor_qr_token,
     _visitor_checkin_otp_hash,
+    _visitor_checkin_window,
+    _require_visitor_checkin_window,
+    _public_helpdesk_otp_hash,
+    _public_helpdesk_token,
+    _verify_public_helpdesk_token,
+    _helpdesk_feedback_ticket_options,
+    get_public_helpdesk_ticket_history,
+    _public_helpdesk_requester,
     _distance_meters,
     _require_helpdesk_building_context,
     _require_helpdesk_branch_access,
@@ -69,11 +90,15 @@ from app import (
     _select_fields,
     _virtual_query,
     database_query,
+    approve_visit,
     issue_visitor_guest_pass,
     public_visitor_check_in,
     send_visitor_checkin_otp,
     verify_visitor_checkin_otp,
+    list_helpdesk_feedback,
     submit_helpdesk_feedback,
+    submit_helpdesk_ticket_feedback,
+    submit_public_helpdesk_ticket_feedback,
 )
 from security import hash_password, verify_password
 from ewp_api import (
@@ -205,6 +230,18 @@ class ApiContractTests(unittest.TestCase):
         selected = _select_fields("emergencies", "*", None)
         self.assertIn("[EvacuationIncidents].*", selected)
         self.assertIn("AS [AssemblyPoint]", selected[1])
+
+    def test_emergency_triggered_at_is_preserved_with_created_at_alias(self):
+        triggered_at = datetime(2026, 10, 15, 6, 30)
+
+        normalized = _normalize(
+            "emergencies",
+            {"TriggeredAt": triggered_at},
+            None,
+        )
+
+        self.assertEqual(normalized["triggered_at"], triggered_at.isoformat())
+        self.assertEqual(normalized["created_at"], triggered_at.isoformat())
 
     def test_emergency_notifications_create_records_and_report_email_delivery(self):
         context = MagicMock()
@@ -371,6 +408,252 @@ class ApiContractTests(unittest.TestCase):
             _helpdesk_priority("URGENT")
         self.assertEqual(error.exception.status_code, 400)
 
+    def test_helpdesk_floor_rename_updates_area_floor_references(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        cursor.__exit__.return_value = False
+        virtual_rows = {
+            "hd_buildings": [{"id": "building-1"}],
+            "hd_building_floors": [
+                {
+                    "id": "floor-1",
+                    "building_id": "building-1",
+                    "floor_number": "1",
+                    "name": "1",
+                    "active": True,
+                }
+            ],
+            "hd_building_areas": [
+                {
+                    "id": "area-1",
+                    "building_id": "building-1",
+                    "floor": "1",
+                    "name": "Pantry",
+                    "active": True,
+                }
+            ],
+        }
+        writes = {}
+
+        def read_virtual(_, table):
+            return [dict(row) for row in virtual_rows[table]]
+
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._current_role", return_value="ADMIN"),
+            patch("app._read_virtual", side_effect=read_virtual),
+            patch("app._write_virtual", side_effect=lambda _, table, rows: writes.update({table: rows})),
+        ):
+            database_query(
+                "hd_building_floors",
+                QueryRequest(
+                    action="upsert",
+                    data={
+                        "id": "floor-1",
+                        "building_id": "building-1",
+                        "floor_number": "1",
+                        "floor_name": "Ground",
+                        "name": "Ground",
+                        "active": True,
+                    },
+                ),
+                {"sub": "admin-1", "role": "ADMIN"},
+            )
+
+        self.assertEqual(writes["hd_building_areas"][0]["floor"], "Ground")
+
+    def test_helpdesk_cannot_create_area_on_deactivated_floor(self):
+        context = MagicMock()
+        context.__exit__.return_value = False
+        virtual_rows = {
+            "hd_buildings": [{"id": "building-1"}],
+            "hd_building_floors": [
+                {
+                    "id": "floor-1",
+                    "building_id": "building-1",
+                    "floor_number": "1",
+                    "name": "Ground",
+                    "active": False,
+                }
+            ],
+            "hd_building_areas": [
+                {
+                    "id": "area-1",
+                    "building_id": "building-1",
+                    "floor": "Ground",
+                    "name": "Pantry",
+                    "active": True,
+                }
+            ],
+        }
+        writes = MagicMock()
+
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._current_role", return_value="ADMIN"),
+            patch(
+                "app._read_virtual",
+                side_effect=lambda _, table: [dict(row) for row in virtual_rows[table]],
+            ),
+            patch("app._write_virtual", writes),
+        ):
+            with self.assertRaises(HTTPException) as error:
+                database_query(
+                    "hd_building_areas",
+                    QueryRequest(
+                        action="upsert",
+                        data={
+                            "id": "area-2",
+                            "building_id": "building-1",
+                            "floor": "Ground",
+                            "name": "Meeting room",
+                            "active": True,
+                        },
+                    ),
+                    {"sub": "admin-1", "role": "ADMIN"},
+                )
+
+        self.assertEqual(error.exception.status_code, 400)
+        writes.assert_not_called()
+
+    def test_helpdesk_can_create_area_using_global_floor(self):
+        context = MagicMock()
+        context.__exit__.return_value = False
+        virtual_rows = {
+            "hd_buildings": [{"id": "building-2"}],
+            "hd_building_floors": [
+                {
+                    "id": "floor-global",
+                    "building_id": None,
+                    "floor_number": "1",
+                    "name": "First Floor",
+                    "active": True,
+                }
+            ],
+            "hd_building_areas": [],
+        }
+        writes = {}
+
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._current_role", return_value="ADMIN"),
+            patch(
+                "app._read_virtual",
+                side_effect=lambda _, table: [dict(row) for row in virtual_rows.get(table, [])],
+            ),
+            patch(
+                "app._write_virtual",
+                side_effect=lambda _, table, rows: writes.update({table: rows}),
+            ),
+        ):
+            database_query(
+                "hd_building_areas",
+                QueryRequest(
+                    action="upsert",
+                    data={
+                        "id": "area-global-floor",
+                        "building_id": "building-2",
+                        "floor": "First Floor",
+                        "name": "Pantry",
+                        "active": True,
+                    },
+                ),
+                {"sub": "admin-1", "role": "ADMIN"},
+            )
+
+        self.assertEqual(writes["hd_building_areas"][0]["building_id"], "building-2")
+        self.assertEqual(writes["hd_building_areas"][0]["floor"], "First Floor")
+
+    def test_helpdesk_can_create_global_floor_without_building_mapping(self):
+        context = MagicMock()
+        context.__exit__.return_value = False
+        writes = {}
+
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._current_role", return_value="ADMIN"),
+            patch("app._read_virtual", return_value=[]),
+            patch(
+                "app._write_virtual",
+                side_effect=lambda _, table, rows: writes.update({table: rows}),
+            ),
+        ):
+            database_query(
+                "hd_building_floors",
+                QueryRequest(
+                    action="upsert",
+                    data={
+                        "id": "floor-global",
+                        "building_id": None,
+                        "floor_number": "1",
+                        "floor_name": "Reception",
+                        "name": "Reception",
+                        "active": True,
+                    },
+                ),
+                {"sub": "admin-1", "role": "ADMIN"},
+            )
+
+        self.assertIsNone(writes["hd_building_floors"][0]["building_id"])
+        self.assertEqual(writes["hd_building_floors"][0]["floor_number"], "1")
+
+    def test_helpdesk_can_deactivate_floor_when_duplicate_exists(self):
+        context = MagicMock()
+        context.__exit__.return_value = False
+        virtual_rows = {
+            "hd_buildings": [],
+            "hd_building_floors": [
+                {
+                    "id": "floor-1",
+                    "building_id": None,
+                    "floor_number": "Floor-1",
+                    "name": "Floor-1",
+                    "active": True,
+                },
+                {
+                    "id": "floor-2",
+                    "building_id": None,
+                    "floor_number": "Floor-1",
+                    "name": "Floor-1",
+                    "active": True,
+                },
+            ],
+        }
+        writes = {}
+
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._current_role", return_value="ADMIN"),
+            patch(
+                "app._read_virtual",
+                side_effect=lambda _, table: [
+                    dict(row) for row in virtual_rows.get(table, [])
+                ],
+            ),
+            patch(
+                "app._write_virtual",
+                side_effect=lambda _, table, rows: writes.update({table: rows}),
+            ),
+        ):
+            database_query(
+                "hd_building_floors",
+                QueryRequest(
+                    action="upsert",
+                    data={
+                        **virtual_rows["hd_building_floors"][0],
+                        "active": False,
+                    },
+                ),
+                {"sub": "admin-1", "role": "ADMIN"},
+            )
+
+        statuses = {
+            floor["id"]: floor["active"]
+            for floor in writes["hd_building_floors"]
+        }
+        self.assertFalse(statuses["floor-1"])
+        self.assertTrue(statuses["floor-2"])
+
     @patch("app._read_virtual")
     def test_helpdesk_building_context_checks_geofence_and_resolves_area(self, read_virtual):
         cursor = MagicMock()
@@ -392,6 +675,7 @@ class ApiContractTests(unittest.TestCase):
                 "name": "Pantry",
                 "active": True,
             }],
+            [],
         ]
 
         building, area, branch_name = _require_helpdesk_building_context(
@@ -402,6 +686,43 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(area["name"], "Pantry")
         self.assertEqual(branch_name, "Bengaluru Office")
         cursor.execute.assert_called_once()
+
+    @patch("app._read_virtual")
+    def test_helpdesk_building_context_rejects_area_on_deactivated_floor(self, read_virtual):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("Bengaluru Office",)
+        read_virtual.side_effect = [
+            [{
+                "id": "building-1",
+                "branch_id": "branch-1",
+                "name": "Bengaluru Office",
+                "latitude": 12.9716,
+                "longitude": 77.5946,
+                "radius_m": 150,
+                "active": True,
+            }],
+            [{
+                "id": "area-1",
+                "building_id": "building-1",
+                "floor": "Floor 1",
+                "name": "Pantry",
+                "active": True,
+            }],
+            [{
+                "id": "floor-1",
+                "building_id": "building-1",
+                "name": "Floor 1",
+                "active": False,
+            }],
+        ]
+
+        with self.assertRaises(HTTPException) as error:
+            _require_helpdesk_building_context(
+                cursor, "building-1", "area-1", 12.9717, 77.5947
+            )
+
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(error.exception.detail, "Choose an area on an active floor.")
 
     @patch("app._read_virtual")
     def test_helpdesk_building_context_rejects_request_outside_geofence(self, read_virtual):
@@ -555,6 +876,493 @@ class ApiContractTests(unittest.TestCase):
             with self.subTest(rating=rating):
                 with self.assertRaises(ValidationError):
                     HelpdeskFeedbackRequest(**payload, rating=rating)
+
+    def test_public_helpdesk_otp_and_guest_token_are_bound_to_building_and_email(self):
+        secret = "h" * 32
+        with patch("app.settings", SimpleNamespace(jwt_secret=secret)):
+            token = _public_helpdesk_token("building-1", "Person@Example.test")
+            identity = _verify_public_helpdesk_token(token, "building-1")
+
+            self.assertEqual(identity, {
+                "building_id": "building-1",
+                "email": "person@example.test",
+            })
+            self.assertNotEqual(
+                _public_helpdesk_otp_hash("building-1", "person@example.test", "123456"),
+                _public_helpdesk_otp_hash("building-2", "person@example.test", "123456"),
+            )
+            with self.assertRaises(HTTPException) as error:
+                _verify_public_helpdesk_token(token, "building-2")
+
+        self.assertEqual(error.exception.status_code, 401)
+
+    def test_public_helpdesk_request_contracts_validate_otp_and_feedback(self):
+        self.assertEqual(
+            PublicHelpdeskOtpRequest(email="person@example.test").email,
+            "person@example.test",
+        )
+        self.assertEqual(
+            PublicHelpdeskOtpVerifyRequest(
+                email="person@example.test",
+                code="123456",
+            ).code,
+            "123456",
+        )
+        with self.assertRaises(ValidationError):
+            PublicHelpdeskOtpVerifyRequest(email="person@example.test", code="12345")
+        with self.assertRaises(ValidationError):
+            HelpdeskTicketFeedbackRequest(
+                ticketId="ticket-1",
+                feedback="A valid comment.",
+                rating=6,
+            )
+        with self.assertRaises(ValidationError):
+            PublicHelpdeskTicketRequest(
+                token="x" * 32,
+                name="Visitor Name",
+                areaId="area-1",
+                categoryId="category-1",
+                description="Too short",
+                latitude=0,
+                longitude=0,
+            )
+
+    def test_public_helpdesk_requester_supports_guests_and_preserves_account_identity(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+        guest_id, guest_name = _public_helpdesk_requester(
+            cursor, "visitor@example.test", "Visitor Name"
+        )
+        self.assertIsNone(guest_id)
+        self.assertEqual(guest_name, "Visitor Name")
+
+        cursor.fetchone.return_value = ("employee-1", "Employee Name")
+        user_id, user_name = _public_helpdesk_requester(
+            cursor, "employee@example.test", "Entered Name"
+        )
+        self.assertEqual(user_id, "employee-1")
+        self.assertEqual(user_name, "Employee Name")
+
+    def test_feedback_ticket_options_include_only_closed_tickets_and_submitter_feedback_state(self):
+        cursor = MagicMock()
+        ticket_rows = [
+            {
+                "Id": "ticket-1",
+                "TicketNo": "HD-001",
+                "Category": "Maintenance",
+                "Status": "CLOSED",
+                "CreatedAt": datetime(2026, 1, 1),
+                "Description": "Repair the office light fixture.",
+            },
+            {
+                "Id": "ticket-2",
+                "TicketNo": "HD-002",
+                "Category": "Cleaning",
+                "Status": "NEW",
+                "CreatedAt": datetime(2026, 1, 2),
+            },
+        ]
+        feedback_rows = [
+            {
+                "feedback_type": "TICKET",
+                "ticket_id": "ticket-1",
+                "submitted_by_email": "person@example.test",
+            },
+            {
+                "feedback_type": "TICKET",
+                "ticket_id": "ticket-2",
+                "submitted_by_email": "other@example.test",
+            },
+        ]
+
+        with (
+            patch("app._read_virtual", return_value=feedback_rows),
+            patch("app.rows_as_dicts", return_value=ticket_rows),
+        ):
+            options = _helpdesk_feedback_ticket_options(
+                cursor, "building-1", "person@example.test"
+            )
+
+        self.assertEqual([item["id"] for item in options], ["ticket-1"])
+        self.assertEqual(
+            [item["feedback_submitted"] for item in options],
+            [True],
+        )
+        self.assertEqual(options[0]["description"], "Repair the office light fixture.")
+        self.assertIn("[Status] = 'CLOSED'", cursor.execute.call_args.args[0])
+
+    def test_feedback_ticket_options_apply_owner_filter_without_a_result_limit(self):
+        cursor = MagicMock()
+        ticket_rows = [
+            {
+                "Id": f"ticket-{index}",
+                "TicketNo": f"HD-{index:04d}",
+                "Category": "Maintenance",
+                "Status": "CLOSED",
+                "Description": f"Ticket issue {index}",
+                "CreatedAt": datetime(2026, 1, index),
+            }
+            for index in range(1, 14)
+        ]
+        with (
+            patch("app._read_virtual", return_value=[]),
+            patch("app.rows_as_dicts", return_value=ticket_rows),
+        ):
+            options = _helpdesk_feedback_ticket_options(
+                cursor, "building-1", "person@example.test"
+            )
+
+        query = cursor.execute.call_args.args[0]
+        self.assertIn("WHERE [BuildingId] = ?", query)
+        self.assertNotIn("TOP", query.upper())
+        self.assertEqual(len(options), 13)
+        self.assertEqual([item["id"] for item in options], [row["Id"] for row in ticket_rows])
+        self.assertIn("LOWER(LTRIM(RTRIM([RaisedByEmail]))) = ?", query)
+        self.assertIn("[Status] = 'CLOSED'", query)
+
+    def test_public_ticket_options_include_open_tickets_for_my_ticket_tracking(self):
+        cursor = MagicMock()
+        ticket_rows = [
+            {
+                "Id": "ticket-open",
+                "TicketNo": "HD-OPEN",
+                "Category": "Maintenance",
+                "Status": "IN_PROGRESS",
+                "CreatedAt": datetime(2026, 1, 1),
+                "Description": "Repair the office light fixture.",
+            }
+        ]
+        with (
+            patch("app._read_virtual", return_value=[]),
+            patch("app.rows_as_dicts", return_value=ticket_rows),
+        ):
+            options = _helpdesk_feedback_ticket_options(
+                cursor, "building-1", "person@example.test", only_closed=False
+            )
+
+        self.assertEqual([item["id"] for item in options], ["ticket-open"])
+        self.assertEqual(options[0]["status"], "IN_PROGRESS")
+        query = cursor.execute.call_args.args[0]
+        self.assertIn("LOWER(LTRIM(RTRIM([RaisedByEmail]))) = ?", query)
+        self.assertNotIn("[Status] = 'CLOSED'", query)
+
+    def test_employee_can_feedback_on_their_own_ticket(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        cursor.fetchone.return_value = ("employee@example.test",)
+        ticket = {
+            "id": "ticket-1",
+            "ticket_no": "HD-001",
+            "raiser_id": "employee-1",
+            "branch_id": "branch-1",
+            "building_id": "building-1",
+            "building_area_id": "area-1",
+            "location": "Main Office",
+            "floor_name": "1",
+            "area_name": "Reception",
+            "status": "CLOSED",
+        }
+        body = HelpdeskTicketFeedbackRequest(
+            ticketId="ticket-1",
+            feedback="The issue was resolved.",
+            rating=5,
+        )
+
+        with (
+            patch("app._current_role", return_value="EMPLOYEE"),
+            patch("app.cursor", return_value=context),
+            patch("app.rows_as_dicts", return_value=[{"Id": "ticket-1"}]),
+            patch("app._normalize", return_value=ticket),
+            patch("app._require_helpdesk_branch_access"),
+            patch("app._read_virtual", return_value=[]),
+            patch("app._write_virtual") as write_virtual,
+            patch("app._helpdesk_branch_name", return_value="Bengaluru Office"),
+            patch("app._current_user_name", return_value="Feedback Employee"),
+        ):
+            result = submit_helpdesk_ticket_feedback(
+                "ticket-1",
+                body,
+                {"sub": "employee-1"},
+            )
+
+        self.assertEqual(result["submitted_by_email"], "employee@example.test")
+        self.assertEqual(result["ticket_id"], "ticket-1")
+        self.assertEqual(result["submitted_by_name"], "Feedback Employee")
+        self.assertEqual(result["branch_name"], "Bengaluru Office")
+        write_virtual.assert_called_once()
+
+    def test_employee_cannot_feedback_on_another_users_ticket(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        cursor.fetchone.return_value = ("employee@example.test",)
+        body = HelpdeskTicketFeedbackRequest(
+            ticketId="ticket-1",
+            feedback="The issue was resolved.",
+            rating=5,
+        )
+        with (
+            patch("app._current_role", return_value="EMPLOYEE"),
+            patch("app.cursor", return_value=context),
+            patch("app.rows_as_dicts", return_value=[{"Id": "ticket-1"}]),
+            patch(
+                "app._normalize",
+                return_value={
+                    "id": "ticket-1",
+                    "raiser_id": "another-employee",
+                    "raiser_email": "another@example.test",
+                    "branch_id": "branch-1",
+                    "status": "CLOSED",
+                },
+            ),
+            patch("app._write_virtual") as write_virtual,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                submit_helpdesk_ticket_feedback(
+                    "ticket-1",
+                    body,
+                    {"sub": "employee-1"},
+                )
+
+        self.assertEqual(error.exception.status_code, 403)
+        self.assertIn("ticket raiser", error.exception.detail)
+        write_virtual.assert_not_called()
+
+    def test_public_feedback_uses_employee_name_and_ticket_branch(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        cursor.fetchone.return_value = ("Employee Name",)
+        body = PublicHelpdeskFeedbackRequest(
+            token="t" * 32,
+            name="Entered Name",
+            ticketId="ticket-1",
+            feedback="The issue was resolved.",
+            rating=5,
+        )
+        ticket = {
+            "id": "ticket-1",
+            "ticket_no": "HD-001",
+            "branch_id": "branch-1",
+            "building_id": "building-1",
+            "location": "Bengaluru Office · Main Building",
+            "raiser_email": "employee@example.test",
+            "status": "CLOSED",
+        }
+        feedback_rows = []
+        with (
+            patch(
+                "app._verify_public_helpdesk_token",
+                return_value={"email": "employee@example.test"},
+            ),
+            patch("app.cursor", return_value=context),
+            patch("app.rows_as_dicts", return_value=[{"Id": "ticket-1"}]),
+            patch("app._normalize", return_value=ticket),
+            patch("app._read_virtual", return_value=feedback_rows),
+            patch("app._write_virtual") as write_virtual,
+            patch("app._helpdesk_branch_name", return_value="Bengaluru Office"),
+        ):
+            result = submit_public_helpdesk_ticket_feedback("building-1", body)
+
+        self.assertEqual(result["submitted_by_name"], "Employee Name")
+        self.assertEqual(result["branch_name"], "Bengaluru Office")
+        self.assertEqual(write_virtual.call_args.args[2][0]["submitted_by_name"], "Employee Name")
+
+    def test_public_feedback_rejects_non_raiser(self):
+        body = PublicHelpdeskFeedbackRequest(
+            token="t" * 32,
+            ticketId="ticket-1",
+            feedback="The issue was resolved.",
+            rating=5,
+        )
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        with (
+            patch(
+                "app._verify_public_helpdesk_token",
+                return_value={"email": "other@example.test"},
+            ),
+            patch("app.cursor", return_value=context),
+            patch("app.rows_as_dicts", return_value=[{"Id": "ticket-1"}]),
+            patch(
+                "app._normalize",
+                return_value={
+                    "id": "ticket-1",
+                    "raiser_email": "raiser@example.test",
+                    "status": "CLOSED",
+                },
+            ),
+            patch("app._read_virtual") as read_virtual,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                submit_public_helpdesk_ticket_feedback("building-1", body)
+
+        self.assertEqual(error.exception.status_code, 404)
+        read_virtual.assert_not_called()
+
+    def test_public_ticket_history_is_available_only_to_raiser(self):
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        ticket = {
+            "id": "ticket-1",
+            "ticket_no": "HD-001",
+            "raiser_email": "person@example.test",
+            "category_name": "Maintenance",
+            "status": "CLOSED",
+            "created_at": "2026-01-01T10:00:00Z",
+            "closed_at": "2026-01-02T10:00:00Z",
+        }
+        with (
+            patch(
+                "app._verify_public_helpdesk_token",
+                return_value={"email": "person@example.test"},
+            ),
+            patch("app.cursor", return_value=context),
+            patch(
+                "app.rows_as_dicts",
+                side_effect=[
+                    [{"Id": "ticket-1"}],
+                    [
+                        {
+                            "Action": "Ticket closed",
+                            "Note": "Completed",
+                            "ActorName": "Helpdesk",
+                            "CreatedAt": datetime(2026, 1, 2, 10),
+                        }
+                    ],
+                ],
+            ),
+            patch("app._normalize", return_value=ticket),
+        ):
+            result = get_public_helpdesk_ticket_history(
+                "building-1", "ticket-1", "t" * 32
+            )
+
+        self.assertEqual(result["ticket"]["ticket_no"], "HD-001")
+        self.assertEqual(result["events"][0]["action"], "Ticket closed")
+        self.assertEqual(result["events"][0]["remarks"], "Completed")
+
+    def test_feedback_list_resolves_legacy_email_submitters_and_branch_names(self):
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        feedback_rows = [
+            {
+                "submitted_by": "employee@example.test",
+                "submitted_by_email": "employee@example.test",
+                "submitted_by_name": "employee@example.test",
+                "branch_id": "branch-1",
+                "branch_name": "",
+            }
+        ]
+        with (
+            patch("app._ensure_admin"),
+            patch("app.cursor", return_value=context),
+            patch("app._read_virtual", return_value=feedback_rows),
+            patch(
+                "app.rows_as_dicts",
+                side_effect=[
+                    [{"Id": "employee-1", "Name": "Employee Name", "Email": "employee@example.test"}],
+                    [{"Id": "branch-1", "Name": "Bengaluru Office"}],
+                ],
+            ),
+        ):
+            result = list_helpdesk_feedback({"sub": "admin-1"})
+
+        self.assertEqual(result[0]["submitted_by_name"], "Employee Name")
+        self.assertEqual(result[0]["branch_name"], "Bengaluru Office")
+
+    def test_employee_cannot_submit_feedback_for_unclosed_ticket(self):
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        body = HelpdeskTicketFeedbackRequest(
+            ticketId="ticket-1",
+            feedback="The issue is still pending.",
+            rating=2,
+        )
+        with (
+            patch("app._current_role", return_value="EMPLOYEE"),
+            patch("app.cursor", return_value=context),
+            patch("app.rows_as_dicts", return_value=[{"Id": "ticket-1"}]),
+            patch(
+                "app._normalize",
+                return_value={
+                    "id": "ticket-1",
+                    "raiser_id": "employee-1",
+                    "status": "IN_PROGRESS",
+                },
+            ),
+            patch("app._require_helpdesk_branch_access"),
+            patch("app._write_virtual") as write_virtual,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                submit_helpdesk_ticket_feedback(
+                    "ticket-1",
+                    body,
+                    {"sub": "employee-1"},
+                )
+
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertIn("closed tickets", error.exception.detail)
+        write_virtual.assert_not_called()
+
+    def test_public_feedback_submission_rejects_unclosed_ticket(self):
+        body = PublicHelpdeskFeedbackRequest(
+            token="t" * 32,
+            ticketId="ticket-1",
+            feedback="The issue is still pending.",
+            rating=2,
+        )
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        with (
+            patch(
+                "app._verify_public_helpdesk_token",
+                return_value={"email": "person@example.test"},
+            ),
+            patch("app.cursor", return_value=context),
+            patch("app.rows_as_dicts", return_value=[{"Id": "ticket-1"}]),
+            patch(
+                "app._normalize",
+                return_value={
+                    "id": "ticket-1",
+                    "raiser_email": "person@example.test",
+                    "status": "RESOLVED",
+                },
+            ),
+            patch("app._read_virtual") as read_virtual,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                submit_public_helpdesk_ticket_feedback("building-1", body)
+
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertIn("closed tickets", error.exception.detail)
+        read_virtual.assert_not_called()
+
+    def test_service_provider_cannot_submit_ticket_feedback(self):
+        body = HelpdeskTicketFeedbackRequest(
+            ticketId="ticket-1",
+            feedback="The issue was resolved.",
+            rating=5,
+        )
+        with (
+            patch("app._current_role", return_value="SERVICE_PROVIDER"),
+            patch("app.cursor") as open_cursor,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                submit_helpdesk_ticket_feedback(
+                    "ticket-1",
+                    body,
+                    {"sub": "provider-1"},
+                )
+
+        self.assertEqual(error.exception.status_code, 403)
+        open_cursor.assert_not_called()
 
     def test_branch_manager_can_create_ticket_and_notifies_active_service_provider(self):
         context = MagicMock()
@@ -712,9 +1520,187 @@ class ApiContractTests(unittest.TestCase):
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "raju@example.test")
         self.assertIn("HD-2026-0001", message["Subject"])
+        self.assertIn(
+            "FCM Console",
+            message.get_body(preferencelist=("html",)).get_content(),
+        )
         plain = message.get_body(preferencelist=("plain",)).get_content()
         self.assertIn("Repair the office light fixture.", plain)
         self.assertIn("https://app.example.test/hd-ticket/ticket-1", plain)
+
+    def test_helpdesk_closed_email_uses_public_ticket_link_only_for_guest_requester(self):
+        smtp = MagicMock()
+        smtp.__enter__.return_value = smtp
+        smtp.__exit__.return_value = False
+        smtp_settings = SimpleNamespace(
+            smtp_host="smtp.example.test",
+            smtp_port=25,
+            smtp_username="",
+            smtp_password="",
+            smtp_from_email="helpdesk@example.test",
+            smtp_use_tls=False,
+            smtp_use_ssl=False,
+            public_app_url="https://app.example.test",
+        )
+        with (
+            patch("app.settings", smtp_settings),
+            patch("app.smtplib.SMTP", return_value=smtp),
+        ):
+            _send_helpdesk_closed_ticket_emails(
+                [
+                    {"Name": "Admin", "Email": "admin@example.test"},
+                    {"Name": "Employee", "Email": "employee@example.test"},
+                    {
+                        "Name": "Guest",
+                        "Email": "guest@example.test",
+                        "PublicRequester": True,
+                    },
+                ],
+                {
+                    "id": "ticket-1",
+                    "ticket_no": "HD-2026-0001",
+                    "building_id": "building-1",
+                    "raiser_email": "guest@example.test",
+                },
+            )
+
+        messages = {
+            call.args[0]["To"]: call.args[0]
+            for call in smtp.send_message.call_args_list
+        }
+        self.assertEqual(
+            set(messages),
+            {"admin@example.test", "employee@example.test", "guest@example.test"},
+        )
+        admin_plain = messages["admin@example.test"].get_body(
+            preferencelist=("plain",)
+        ).get_content()
+        self.assertIn("closed", messages["admin@example.test"]["Subject"].lower())
+        self.assertIn("https://app.example.test/hd-ticket/ticket-1", admin_plain)
+        employee_plain = messages["employee@example.test"].get_body(
+            preferencelist=("plain",)
+        ).get_content()
+        self.assertIn("https://app.example.test/hd-ticket/ticket-1", employee_plain)
+        guest_plain = messages["guest@example.test"].get_body(
+            preferencelist=("plain",)
+        ).get_content()
+        self.assertIn(
+            "https://app.example.test/hd-raise?building=building-1&ticket=ticket-1",
+            guest_plain,
+        )
+        self.assertNotIn("https://app.example.test/hd-ticket/ticket-1", guest_plain)
+        self.assertIn("resolved and closed", guest_plain)
+        self.assertIn("We'd love to hear your feedback", guest_plain)
+        self.assertIn("https://app.example.test/hd-raise?building=building-1", guest_plain)
+
+    def test_helpdesk_close_schedules_email_after_transition_only(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        previous = {
+            "Id": "ticket-1",
+            "TicketNo": "HD-2026-0001",
+            "RaisedByName": "Employee",
+            "RaisedByEmail": "employee@example.test",
+            "RaisedByUserId": None,
+            "Category": "Maintenance",
+            "Location": "North Office",
+            "BuildingId": "building-1",
+            "Status": "RESOLVED",
+        }
+        updated = {
+            **previous,
+            "Status": "CLOSED",
+        }
+        background_tasks = BackgroundTasks()
+        with (
+            patch("app._current_role", return_value="ADMIN"),
+            patch("app.cursor", return_value=context),
+            patch(
+                "app.rows_as_dicts",
+                side_effect=[[previous], [updated], [{"Name": "Admin", "Email": "admin@example.test"}]],
+            ),
+        ):
+            result = database_query(
+                "hd_tickets",
+                QueryRequest(
+                    action="update",
+                    data={"status": "CLOSED"},
+                    filters=[{"column": "id", "value": "ticket-1"}],
+                ),
+                {"sub": "admin-1", "role": "ADMIN"},
+                background_tasks,
+            )
+
+        self.assertEqual(result["data"][0]["status"], "CLOSED")
+        self.assertEqual(len(background_tasks.tasks), 1)
+        self.assertEqual(background_tasks.tasks[0].func, _send_helpdesk_closed_ticket_emails)
+        recipients = background_tasks.tasks[0].args[0]
+        self.assertEqual(
+            {recipient["Email"] for recipient in recipients},
+            {"admin@example.test", "employee@example.test"},
+        )
+        requester = next(
+            recipient
+            for recipient in recipients
+            if recipient["Email"] == "employee@example.test"
+        )
+        self.assertTrue(requester["PublicRequester"])
+        self.assertIn("UPDLOCK, ROWLOCK", cursor.execute.call_args_list[0].args[0])
+        self.assertIn("RaisedByUserId", cursor.execute.call_args_list[0].args[0])
+
+    def test_admin_cannot_assign_helpdesk_ticket_through_generic_database_api(self):
+        for changes in (
+            {"provider_id": "provider-1", "status": "ASSIGNED"},
+            {"ProviderName": "Service Team"},
+            {"status": "ASSIGNED"},
+        ):
+            with self.subTest(changes=changes), patch(
+                "app._current_role", return_value="ADMIN"
+            ):
+                with self.assertRaises(HTTPException) as error:
+                    database_query(
+                        "hd_tickets",
+                        QueryRequest(
+                            action="update",
+                            data=changes,
+                            filters=[{"column": "id", "value": "ticket-1"}],
+                        ),
+                        {"sub": "admin-1", "role": "ADMIN"},
+                    )
+            self.assertEqual(error.exception.status_code, 403)
+
+    def test_helpdesk_resolved_status_does_not_schedule_closure_email(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        background_tasks = BackgroundTasks()
+        with (
+            patch("app._current_role", return_value="SERVICE_PROVIDER"),
+            patch("app.cursor", return_value=context),
+            patch(
+                "app.rows_as_dicts",
+                return_value=[
+                    {
+                        "Id": "ticket-1",
+                        "TicketNo": "HD-2026-0001",
+                        "Status": "RESOLVED",
+                    }
+                ],
+            ),
+        ):
+            database_query(
+                "hd_tickets",
+                QueryRequest(
+                    action="update",
+                    data={"status": "RESOLVED"},
+                    filters=[{"column": "id", "value": "ticket-1"}],
+                ),
+                {"sub": "provider-1", "role": "SERVICE_PROVIDER"},
+                background_tasks,
+            )
+
+        self.assertEqual(background_tasks.tasks, [])
 
     def test_branch_manager_helpdesk_ticket_and_event_scope_stays_owner_limited(self):
         claims = {"sub": "manager-1", "role": "BRANCH_MANAGER"}
@@ -984,6 +1970,33 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(_field("visit_requests", "visitor_employee_id", None), "VisitorEmployeeId")
         self.assertEqual(_field("visit_requests", "visitor_branch_id", None), "VisitorBranchId")
 
+    def test_visit_schedule_rejects_past_start_time_on_visit_day(self):
+        now = datetime(2026, 10, 16, 12, 51)
+        with self.assertRaises(HTTPException) as error:
+            _validate_visit_schedule(
+                {
+                    "visit_date": "2026-10-16",
+                    "expected_arrival": "10:00",
+                },
+                now,
+            )
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(
+            error.exception.detail,
+            "Invalid time. Please select a proper time schedule.",
+        )
+
+    def test_visit_schedule_allows_future_start_times_and_future_dates(self):
+        now = datetime(2026, 10, 16, 12, 51)
+        _validate_visit_schedule(
+            {"visit_date": "2026-10-16", "expected_arrival": "12:52"},
+            now,
+        )
+        _validate_visit_schedule(
+            {"visit_date": "2026-10-17", "expected_arrival": "10:00"},
+            now,
+        )
+
     def test_internal_visitor_details_are_resolved_from_active_employee_and_other_branch(self):
         class InternalVisitorCursor:
             def __init__(self, destination_id):
@@ -1105,6 +2118,7 @@ class ApiContractTests(unittest.TestCase):
             patch("app._current_user_name", return_value="System Admin"),
             patch("app._visitor_qr_token", return_value="qr-token"),
             patch("app._send_visitor_invitation") as send_invitation,
+            patch("app._notify_branch_managers_of_approved_visit", return_value="SENT") as notify_managers,
             patch("app._normalize", return_value={"id": "visit-1", "name": "Visitor"}),
             patch("app._append_vms_notification"),
         ):
@@ -1127,7 +2141,11 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("[ReviewedByName]", insert_sql)
         self.assertIn("System Admin", insert_values)
         send_invitation.assert_called_once()
+        notify_managers.assert_called_once()
+        self.assertIs(notify_managers.call_args.args[0], cursor)
+        self.assertEqual(notify_managers.call_args.args[1]["id"], "visit-1")
         self.assertEqual(result["data"][0]["id"], "visit-1")
+        self.assertEqual(result["data"][0]["branch_manager_notification_status"], "SENT")
 
     def test_pending_visit_emails_only_active_branch_managers_for_its_location(self):
         context = MagicMock()
@@ -1415,7 +2433,13 @@ class ApiContractTests(unittest.TestCase):
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "requester@example.test")
         self.assertIn("E-Work Permit WHP-0001", message["Subject"])
-        self.assertIn("Permit WHP-0001 has been approved.", message.get_content())
+        self.assertIn(
+            "Permit WHP-0001 has been approved.",
+            message.get_body(preferencelist=("plain",)).get_content(),
+        )
+        html_body = message.get_body(preferencelist=("html",)).get_content()
+        self.assertIn("FCM Console", html_body)
+        self.assertIn("E-Work Permit", html_body)
 
     def test_ewp_notifications_are_loaded_only_for_the_signed_in_user(self):
         context = MagicMock()
@@ -1575,7 +2599,11 @@ class ApiContractTests(unittest.TestCase):
 
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "vendor@example.com")
-        self.assertIn("012345", message.get_content())
+        self.assertIn("012345", message.get_body(preferencelist=("plain",)).get_content())
+        self.assertIn(
+            "012345",
+            message.get_body(preferencelist=("html",)).get_content(),
+        )
         smtp.starttls.assert_called_once()
 
     def test_gate_otp_email_identifies_gate_checkin_purpose(self):
@@ -1604,7 +2632,7 @@ class ApiContractTests(unittest.TestCase):
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "vendor@example.com")
         self.assertIn("gate check-in", message["Subject"])
-        self.assertIn("012345", message.get_content())
+        self.assertIn("012345", message.get_body(preferencelist=("plain",)).get_content())
 
     def test_gate_otp_email_includes_contractor_verification_link(self):
         smtp_settings = SimpleNamespace(
@@ -2306,6 +3334,7 @@ class ApiContractTests(unittest.TestCase):
             )
 
     def test_visitor_checkin_otp_send_checks_location_and_sends_to_registered_email(self):
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         context = MagicMock()
         cursor = context.__enter__.return_value
         cursor.fetchone.return_value = None
@@ -2315,6 +3344,9 @@ class ApiContractTests(unittest.TestCase):
             "Email": "visitor@example.com",
             "VisitorName": "Visitor",
             "Location": "Hosur Office",
+            "VisitDate": now.date(),
+            "ExpectedArrival": (now - timedelta(minutes=5)).time(),
+            "ExpectedDeparture": (now + timedelta(minutes=30)).time(),
         }
         with (
             patch("app.cursor", return_value=context),
@@ -2338,7 +3370,69 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(result["destination"], "v***@example.com")
         self.assertEqual(result["expiresInSeconds"], 600)
 
+    def test_visitor_cannot_request_checkin_code_before_scheduled_start(self):
+        timezone = ZoneInfo("Asia/Kolkata")
+        start = datetime.now(timezone) + timedelta(minutes=30)
+        visit = {
+            "Status": "APPROVED",
+            "Email": "visitor@example.com",
+            "Location": "Hosur Office",
+            "VisitDate": start.date(),
+            "ExpectedArrival": start.time(),
+            "ExpectedDeparture": (start + timedelta(hours=1)).time(),
+        }
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._public_visit_by_token", return_value=visit),
+            patch("app._require_visitor_inside_geofence") as check_geofence,
+            patch("app._send_visitor_checkin_otp_email") as send_email,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                send_visitor_checkin_otp(
+                    "visit-1",
+                    VisitorCheckInOtpRequest(
+                        token="s" * 64,
+                        latitude=12.0,
+                        longitude=77.0,
+                    ),
+                )
+
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertIn("opens at", error.exception.detail)
+        check_geofence.assert_not_called()
+        send_email.assert_not_called()
+
+    def test_visitor_checkin_is_limited_to_approved_local_schedule_window(self):
+        timezone = ZoneInfo("Asia/Kolkata")
+        visit = {
+            "VisitDate": date(2026, 10, 16),
+            "ExpectedArrival": time(18, 0),
+            "ExpectedDeparture": time(21, 0),
+        }
+        before = datetime(2026, 10, 16, 17, 0, tzinfo=timezone)
+        during = datetime(2026, 10, 16, 18, 0, tzinfo=timezone)
+        after = datetime(2026, 10, 16, 21, 0, tzinfo=timezone)
+
+        available, message = _visitor_checkin_window(visit, before)
+        self.assertFalse(available)
+        self.assertIn("opens at 18:00 IST", message)
+        with self.assertRaises(HTTPException) as early:
+            _require_visitor_checkin_window(visit, before)
+        self.assertEqual(early.exception.status_code, 409)
+
+        self.assertTrue(_visitor_checkin_window(visit, during)[0])
+        available, message = _visitor_checkin_window(visit, after)
+        self.assertFalse(available)
+        self.assertIn("window ended at 21:00 IST", message)
+        with self.assertRaises(HTTPException) as late:
+            _require_visitor_checkin_window(visit, after)
+        self.assertEqual(late.exception.status_code, 409)
+
     def test_visitor_checkin_otp_verification_counts_bad_codes_and_does_not_check_in(self):
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         context = MagicMock()
         cursor = context.__enter__.return_value
         cursor.fetchone.return_value = (
@@ -2355,7 +3449,14 @@ class ApiContractTests(unittest.TestCase):
             patch("app.settings", SimpleNamespace(jwt_secret="s" * 32)),
             patch(
                 "app._public_visit_by_token",
-                return_value={"Status": "APPROVED", "Email": "visitor@example.com", "Location": "Hosur Office"},
+                return_value={
+                    "Status": "APPROVED",
+                    "Email": "visitor@example.com",
+                    "Location": "Hosur Office",
+                    "VisitDate": now.date(),
+                    "ExpectedArrival": (now - timedelta(minutes=5)).time(),
+                    "ExpectedDeparture": (now + timedelta(minutes=30)).time(),
+                },
             ),
             patch("app._require_visitor_inside_geofence"),
         ):
@@ -2474,6 +3575,54 @@ class ApiContractTests(unittest.TestCase):
             self.assertEqual(first, _visitor_qr_token("visit-1"))
             self.assertNotEqual(first, _visitor_qr_token("visit-2"))
 
+    def test_otp_emails_include_branded_html_and_plain_text_alternatives(self):
+        smtp_settings = SimpleNamespace(
+            smtp_host="mail.example.com",
+            smtp_port=587,
+            smtp_username="",
+            smtp_password="",
+            smtp_from_email="noreply@example.com",
+            smtp_use_tls=False,
+            smtp_use_ssl=False,
+        )
+        smtp = MagicMock()
+        smtp.__enter__.return_value = smtp
+        with (
+            patch("app.settings", smtp_settings),
+            patch("app.smtplib.SMTP", return_value=smtp),
+        ):
+            _send_visitor_checkin_otp_email(
+                "visitor@example.com",
+                "012345",
+                {"VisitorName": "Example Visitor", "VisitorCode": "VIS-001"},
+            )
+            _send_public_helpdesk_otp(
+                "employee@example.com",
+                "654321",
+                "North Office",
+            )
+
+        self.assertEqual(smtp.send_message.call_count, 2)
+        for call in smtp.send_message.call_args_list:
+            message = call.args[0]
+            plain = message.get_body(preferencelist=("plain",)).get_content()
+            html_body = message.get_body(preferencelist=("html",)).get_content()
+            self.assertIn("FCM Console", html_body)
+            self.assertNotIn("This is an automated message from FCM Console.", html_body)
+            self.assertIn("expires in 10 minutes", plain)
+        self.assertIn(
+            "012345",
+            smtp.send_message.call_args_list[0].args[0]
+            .get_body(preferencelist=("html",))
+            .get_content(),
+        )
+        self.assertIn(
+            "654321",
+            smtp.send_message.call_args_list[1].args[0]
+            .get_body(preferencelist=("html",))
+            .get_content(),
+        )
+
     def test_visitor_invitation_is_sent_through_configured_smtp(self):
         smtp_settings = SimpleNamespace(
             smtp_host="mail.example.com",
@@ -2515,8 +3664,131 @@ class ApiContractTests(unittest.TestCase):
             for part in sent_message.walk()
             if part.get_content_type() == "text/html"
         )
+        self.assertIn("FCM Console", html_content)
+        self.assertNotIn("This is an automated message from FCM Console.", html_content)
+        self.assertIn("Visitor Management", html_content)
         self.assertIn(">Check in now</a>", html_content)
+        plain_content = sent_message.get_body(("plain",)).get_content()
+        removed_instructions = (
+            "Present this QR at the entrance",
+            "This printable QR pass is your guest card",
+            "Return the printed pass to Security manually before checking out",
+        )
+        for instruction in removed_instructions:
+            self.assertNotIn(instruction, plain_content)
+            self.assertNotIn(instruction, html_content)
+        self.assertIn("Open your secure visitor pass and check in:", plain_content)
         self.assertEqual(message_id, sent_message["Message-ID"])
+
+    def test_approved_visit_schedule_email_includes_destination_and_schedule(self):
+        smtp_settings = SimpleNamespace(
+            smtp_host="mail.example.com",
+            smtp_port=587,
+            smtp_username="smtp-user",
+            smtp_password="smtp-password",
+            smtp_from_email="visitors@example.com",
+            smtp_use_tls=True,
+            smtp_use_ssl=False,
+        )
+        smtp = MagicMock()
+        smtp.__enter__.return_value = smtp
+        with (
+            patch("app.settings", smtp_settings),
+            patch("app.smtplib.SMTP", return_value=smtp),
+        ):
+            _send_branch_manager_visit_approved_email(
+                {"Id": "manager-1", "Email": "manager@example.com"},
+                {
+                    "id": "visit-1",
+                    "name": "Example Visitor",
+                    "location": "Hosur Office",
+                    "visitDate": "2026-10-10",
+                    "expectedArrival": "09:30",
+                    "expectedDeparture": "12:30",
+                    "hostName": "Anusha",
+                    "purpose": "Project meeting",
+                    "requestId": "REQ-100",
+                    "visitorId": "VIS-100",
+                },
+            )
+
+        sent = smtp.send_message.call_args.args[0]
+        self.assertEqual(sent["To"], "manager@example.com")
+        self.assertIn("scheduled to visit Hosur Office", sent["Subject"])
+        body = sent.get_body(("plain",)).get_content()
+        for expected in (
+            "This visitor is scheduled to visit your branch.",
+            "Visitor: Example Visitor",
+            "Date: 2026-10-10",
+            "Time: 09:30 - 12:30",
+            "Location: Hosur Office",
+            "Host: Anusha",
+            "Purpose: Project meeting",
+            "Request: REQ-100",
+            "Visitor ID: VIS-100",
+        ):
+            self.assertIn(expected, body)
+
+    def test_approved_visit_emails_active_branch_managers(self):
+        cursor = MagicMock()
+        manager = {"Id": "manager-1", "Email": "manager@example.com", "Name": "Manager"}
+        visit = {"id": "visit-1", "location": "Hosur Office"}
+        with (
+            patch("app.rows_as_dicts", return_value=[manager]),
+            patch("app._send_branch_manager_visit_approved_email") as send_manager_email,
+        ):
+            status = _notify_branch_managers_of_approved_visit(cursor, visit)
+
+        query, location, address = cursor.execute.call_args.args
+        self.assertIn("manager.[Role] = 'BRANCH_MANAGER'", query)
+        self.assertIn("manager.[IsActive] = 1", query)
+        self.assertEqual((location, address), ("Hosur Office", "Hosur Office"))
+        send_manager_email.assert_called_once_with(manager, visit)
+        self.assertEqual(status, "SENT")
+
+    def test_approved_visit_manager_email_resolves_location_for_legacy_visit(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("Hosur Office",)
+        manager = {"Id": "manager-1", "Email": "manager@example.com", "Name": "Manager"}
+        with (
+            patch("app.rows_as_dicts", return_value=[manager]),
+            patch("app._send_branch_manager_visit_approved_email") as send_manager_email,
+        ):
+            status = _notify_branch_managers_of_approved_visit(cursor, {"id": "visit-1"})
+
+        self.assertIn("[Location]", cursor.execute.call_args_list[0].args[0])
+        self.assertEqual(cursor.execute.call_args_list[1].args[1:], ("Hosur Office", "Hosur Office"))
+        send_manager_email.assert_called_once_with(
+            manager, {"id": "visit-1", "location": "Hosur Office"}
+        )
+        self.assertEqual(status, "SENT")
+
+    def test_approving_visit_sends_schedule_email_to_branch_managers(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        visit = {
+            "id": "visit-1",
+            "name": "Example Visitor",
+            "email": "visitor@example.com",
+            "location": "Hosur Office",
+        }
+        with (
+            patch("app.cursor", return_value=context),
+            patch("app._current_role", return_value="BRANCH_MANAGER"),
+            patch("app._require_visit_branch_access"),
+            patch("app._current_user_name", return_value="Branch Manager"),
+            patch("app._visitor_qr_token", return_value="qr-token"),
+            patch("app._legacy_visit", return_value=visit),
+            patch("app._append_vms_notification"),
+            patch("app._send_visitor_invitation"),
+            patch("app._visitor_checkin_url", return_value="https://example.com/pass"),
+            patch("app._notify_branch_managers_of_approved_visit", return_value="SENT") as notify_managers,
+        ):
+            result = approve_visit("visit-1", {"sub": "manager-1", "role": "BRANCH_MANAGER"})
+
+        notify_managers.assert_called_once_with(cursor, visit)
+        self.assertEqual(result["branchManagerNotificationStatus"], "SENT")
 
     def test_security_cannot_mutate_visit_rows_through_generic_database_api(self):
         with patch("app._current_role", return_value="SECURITY"):
@@ -2596,6 +3868,104 @@ class ApiContractTests(unittest.TestCase):
         self.assertIn("RequestedByUserId", clause)
         self.assertIn("HostUserId", clause)
         self.assertEqual(params, ["user-1", "user-1"])
+
+    def test_employee_can_mark_own_helpdesk_notification_read(self):
+        context = MagicMock()
+        cursor = context.__enter__.return_value
+        context.__exit__.return_value = False
+        notifications = [
+            {"id": "notification-own", "recipient_id": "employee-1", "is_read": False},
+            {"id": "notification-other", "recipient_id": "employee-2", "is_read": False},
+        ]
+        with (
+            patch("app._current_role", return_value="EMPLOYEE"),
+            patch("app.cursor", return_value=context),
+            patch("app._read_virtual", return_value=notifications),
+            patch("app._write_virtual") as write_virtual,
+        ):
+            result = database_query(
+                "hd_notifications",
+                QueryRequest(
+                    action="update",
+                    data={"is_read": True},
+                    filters=[{"column": "id", "value": "notification-own"}],
+                ),
+                {"sub": "employee-1", "role": "EMPLOYEE"},
+            )
+
+        self.assertEqual(result["data"][0]["id"], "notification-own")
+        self.assertTrue(result["data"][0]["is_read"])
+        self.assertEqual(
+            [row["id"] for row in write_virtual.call_args.args[2]],
+            ["notification-own", "notification-other"],
+        )
+        self.assertTrue(write_virtual.call_args.args[2][0]["is_read"])
+        self.assertFalse(write_virtual.call_args.args[2][1]["is_read"])
+
+    def test_helpdesk_notification_list_is_limited_to_current_recipient(self):
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        notifications = [
+            {"id": "notification-own", "recipient_id": "employee-1"},
+            {"id": "notification-other", "recipient_id": "employee-2"},
+        ]
+        with (
+            patch("app._current_role", return_value="EMPLOYEE"),
+            patch("app.cursor", return_value=context),
+            patch("app._read_virtual", return_value=notifications),
+        ):
+            result = database_query(
+                "hd_notifications",
+                QueryRequest(action="select"),
+                {"sub": "employee-1", "role": "EMPLOYEE"},
+            )
+
+        self.assertEqual(
+            [notification["id"] for notification in result["data"]],
+            ["notification-own"],
+        )
+
+    def test_employee_cannot_mark_another_users_helpdesk_notification_read(self):
+        context = MagicMock()
+        context.__enter__.return_value = MagicMock()
+        context.__exit__.return_value = False
+        notifications = [
+            {"id": "notification-other", "recipient_id": "employee-2", "is_read": False},
+        ]
+        with (
+            patch("app._current_role", return_value="EMPLOYEE"),
+            patch("app.cursor", return_value=context),
+            patch("app._read_virtual", return_value=notifications),
+            patch("app._write_virtual") as write_virtual,
+        ):
+            result = database_query(
+                "hd_notifications",
+                QueryRequest(
+                    action="update",
+                    data={"is_read": True},
+                    filters=[{"column": "id", "value": "notification-other"}],
+                ),
+                {"sub": "employee-1", "role": "EMPLOYEE"},
+            )
+
+        self.assertEqual(result["data"], [])
+        self.assertFalse(write_virtual.call_args.args[2][0]["is_read"])
+
+    def test_helpdesk_notification_update_cannot_change_other_fields(self):
+        with patch("app._current_role", return_value="EMPLOYEE"):
+            with self.assertRaises(HTTPException) as error:
+                database_query(
+                    "hd_notifications",
+                    QueryRequest(
+                        action="update",
+                        data={"is_read": True, "recipient_id": "employee-2"},
+                        filters=[{"column": "id", "value": "notification-own"}],
+                    ),
+                    {"sub": "employee-1", "role": "EMPLOYEE"},
+                )
+
+        self.assertEqual(error.exception.status_code, 400)
 
     def test_branch_manager_visit_scope_matches_assigned_branch_location(self):
         claims = {"sub": "manager-1", "role": "BRANCH_MANAGER"}
