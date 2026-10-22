@@ -19,7 +19,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-
 from config import settings
 from database import cursor, rows_as_dicts
 from email_templates import branded_email_html, plain_text_to_html

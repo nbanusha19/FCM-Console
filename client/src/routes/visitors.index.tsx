@@ -128,7 +128,7 @@ function VisitorsPage() {
   const approve = async (visit: VisitRequest) => {
     if (!user) return;
     try {
-      const approvedVisit = await approveVisitRequest(visit.id, user);
+      const approvedVisit = await approveVisitRequest(visit.id, user, setInvitation);
       setInvitation(approvedVisit);
       toast.success(
         approvedVisit.invitation_sent_at
@@ -138,21 +138,27 @@ function VisitorsPage() {
       await reload();
     } catch (cause) {
       await queryClient.invalidateQueries({ queryKey: ["visit-requests"] });
-      if (
+      const emailFailed =
         cause instanceof ApiError &&
         cause.status === 502 &&
-        cause.message.includes("Visit approved")
-      ) {
-        try {
-          const approvedVisit = (await listVisitRequests()).find((item) => item.id === visit.id);
-          if (approvedVisit) setInvitation(approvedVisit);
+        cause.message.includes("Visit approved");
+      try {
+        const requests = await listVisitRequests();
+        const approvedVisit = requests.find(
+          (item) =>
+            item.id === visit.id && ["APPROVED", "CARD_ISSUED", "CHECKED_IN"].includes(item.status),
+        );
+        if (approvedVisit) {
+          setInvitation(approvedVisit);
           toast.error(
-            approvedVisit
+            emailFailed
               ? "The request was approved, but its email failed. Retry from the invitation screen."
-              : "The request was approved, but its email failed. Refresh the visitor list and resend the invitation.",
+              : "The request was approved, but a follow-up step failed. The invitation screen was opened.",
           );
           return;
-        } catch {
+        }
+      } catch {
+        if (emailFailed) {
           toast.error(
             "The request was approved, but its email failed. Refresh the visitor list and resend the invitation.",
           );
@@ -404,7 +410,16 @@ function VisitorsPage() {
         </div>
       </section>
 
-      <NewRequestDialog open={creating} onOpenChange={setCreating} onCreated={() => void reload()} />
+      <NewRequestDialog
+        open={creating}
+        onOpenChange={setCreating}
+        onCreated={(createdVisit) => {
+          void reload();
+          if (["APPROVED", "CARD_ISSUED", "CHECKED_IN"].includes(createdVisit.status)) {
+            setInvitation(createdVisit);
+          }
+        }}
+      />
       <VisitorPassDialog
         visit={pass}
         onClose={() => setPass(null)}

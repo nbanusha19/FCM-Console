@@ -51,7 +51,9 @@ export const canCreateVisitRequest = (u: AppUser | null) =>
   u?.role === "ADMIN" || u?.role === "BRANCH_MANAGER" || u?.role === "EMPLOYEE";
 export const canConfirmArrival = isVmsStaff;
 export const canDecide = (u: AppUser | null, v: VisitRequest) =>
-  !!u && (v.source === "WALK_IN" || v.requested_by !== u.id) && (isVisitReviewer(u) || v.host_id === u.id);
+  !!u &&
+  (u.role === "ADMIN" || v.source === "WALK_IN" || v.requested_by !== u.id) &&
+  (isVisitReviewer(u) || v.host_id === u.id);
 
 export function canIssueVisitorCard(user: AppUser | null, visit: VisitRequest) {
   if (!["APPROVED", "CARD_ISSUED", "CHECKED_IN"].includes(visit.status) || visit.guest_card_id) return false;
@@ -181,13 +183,30 @@ async function transition(id: string, expectedStatus: string, values: T["visit_r
   return data!;
 }
 
-export async function approveVisitRequest(id: string, user: AppUser) {
+export async function approveVisitRequest(
+  id: string,
+  user: AppUser,
+  onApproved?: (visit: VisitRequest) => void,
+) {
   const current = await getVisit(id);
-  if (!current || current.status !== "PENDING") throw new Error("Only pending requests can be approved.");
+  if (!current || current.status !== "PENDING") {
+    throw new Error("Only pending requests can be approved.");
+  }
   if (!canDecide(user, current)) throw new Error("You are not allowed to approve this request.");
-  await apiRequest(`/visits/${encodeURIComponent(id)}/approve`, { method: "POST" });
-  const v = await getVisit(id);
-  if (!v) throw new Error("The request was approved, but it could not be reloaded.");
+  const result = await apiRequest<{
+    status: string;
+    visitorId?: string | null;
+    emailSentAt?: string | null;
+  }>(`/visits/${encodeURIComponent(id)}/approve`, { method: "POST" });
+  const v: VisitRequest = {
+    ...current,
+    status: result.status,
+    visitor_code: result.visitorId || current.visitor_code,
+    invitation_sent_at: result.emailSentAt ?? current.invitation_sent_at,
+    reviewed_by_name: user.name,
+    reviewed_at: new Date().toISOString(),
+  };
+  onApproved?.(v);
   await logVisitEvent(id, "APPROVED", "Approved — visit QR issued", user);
   return v;
 }

@@ -19,6 +19,7 @@ import {
   listVisitorEmployeeOptions,
   listVisitorTypes,
   type VisitInput,
+  type VisitRequest,
 } from "@/services/visitor-requests";
 import { notifyHostForApproval } from "@/services/vms-notify";
 
@@ -128,7 +129,7 @@ export function NewRequestDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated?: () => void;
+  onCreated?: (visit: VisitRequest) => void;
 }) {
   const { user, refresh } = useApp();
   const [form, setForm] = useState<VisitInput>(() => emptyForm());
@@ -214,12 +215,15 @@ export function NewRequestDialog({
         user,
       );
       toast.success(`Request ${v.request_no} submitted`, {
-        description: v.status === "APPROVED" ? "Approved — you can now send the invitation." : "Waiting for host approval.",
+        description:
+          v.status === "APPROVED"
+            ? "Approved — displaying the invitation."
+            : "Waiting for host approval.",
       });
       if (v.status === "PENDING") void notifyHostForApproval(v, user);
       onOpenChange(false);
       refresh();
-      onCreated?.();
+      onCreated?.(v);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save this request.");
     } finally {
